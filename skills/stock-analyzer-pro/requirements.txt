@@ -1,0 +1,5 @@
+# Python 3.6+ 兼容版本
+yfinance>=0.1.70
+pandas>=1.1.0
+numpy>=1.18.0
+requests>=2.20.0

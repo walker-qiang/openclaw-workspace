@@ -2,15 +2,23 @@
 
 _Learn about the person you're helping. Update this as you go._
 
-- **Name:**
-- **What to call them:**
+- **Name:** (待填写)
+- **What to call them:** (待填写)
 - **Pronouns:** _(optional)_
-- **Timezone:**
-- **Notes:**
+- **Timezone:** Asia/Shanghai (UTC+8)
+- **Notes:** 
 
 ## Context
 
-_(What do they care about? What projects are they working on? What annoys them? What makes them laugh? Build this over time.)_
+### 投资理念
+- **价值投资** - 关注企业内在价值
+- **高不买，低不卖** - 逆向投资，不追涨杀跌
+- **安全边际** - 买入价格要有足够的安全边际
+
+### 关注的股票
+- A 股龙头：贵州茅台、格力电器、比亚迪
+- 港股：腾讯控股
+- 中概股：冬海集团 (Sea Limited)
 
 ---
 
