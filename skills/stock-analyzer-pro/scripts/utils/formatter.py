@@ -32,8 +32,8 @@ class ReportFormatter:
         price = quote_data.get('price', 0)
         change_pct = quote_data.get('change_percent', 0)
         
-        # 生成综合评级
-        rating = self._calculate_rating(financial_analysis, technical_analysis, valuation_analysis, risk_analysis)
+        # 生成综合评级（价值投资优先）
+        rating = self._calculate_rating(financial_analysis, technical_analysis, valuation_analysis, risk_analysis, value_analysis)
         
         # 构建 Markdown 报告
         markdown = f"""## 📈 {name} ({code}) 分析报告
@@ -49,7 +49,7 @@ class ReportFormatter:
 | 当前价 | ¥{price:.2f} | {change_pct:+.2f}% |
 | PE(TTM) | {quote_data.get('pe_ttm', 'N/A')} | {valuation_analysis.get('pe', {}).get('icon', '⚪')} |
 | PB | {quote_data.get('pb', 'N/A')} | {valuation_analysis.get('pb', {}).get('icon', '⚪')} |
-| 市值 | {self._format_market_cap(quote_data.get('market_cap', 0))} | - |
+| 市值 | {self._format_market_cap(quote_data.get('market_cap', 0))} |  -  |
 | 52 周范围 | {self._format_52w_range(quote_data)} | - |
 
 ---
@@ -154,9 +154,65 @@ class ReportFormatter:
                 markdown += "数据验证通过，无明显问题\n"
                 
             markdown += "\n---\n\n"
+        
+        # 价值投资分析
+        if value_analysis:
+            markdown += f"""### 💎 价值投资分析
+
+**内在价值**: ¥{value_analysis.get('intrinsic_value', {}).get('comprehensive', 0):.2f}
+
+**安全边际**: {value_analysis.get('margin_of_safety', {}).get('percentage', 0):.1f}% {value_analysis.get('margin_of_safety', {}).get('icon', '⚪')} {value_analysis.get('margin_of_safety', {}).get('level', '')}
+
+**估值水平**: {value_analysis.get('valuation_level', {}).get('level', 'N/A')} {value_analysis.get('valuation_level', {}).get('icon', '⚪')}
+
+**{value_analysis.get('valuation_level', {}).get('comment', '')}**
+
+"""
+            # 买入/卖出区间
+            buy_zone = value_analysis.get('buy_zone', {})
+            sell_zone = value_analysis.get('sell_zone', {})
+            if buy_zone and sell_zone:
+                markdown += f"""**买入区间**:
+- 激进买入价：¥{buy_zone.get('aggressive', 0):.2f}（7 折）
+- 保守买入价：¥{buy_zone.get('conservative', 0):.2f}（5 折）
+
+**卖出区间**:
+- 开始卖出：¥{sell_zone.get('start', 0):.2f}（1.5 倍）
+- 坚决卖出：¥{sell_zone.get('aggressive', 0):.2f}（2 倍）
+
+"""
             
-        markdown += f"""
-**风险点评**: {risk_analysis.get('summary', '暂无')}
+            # 价值投资评分
+            value_score = value_analysis.get('value_score', 0)
+            if value_score >= 80:
+                score_icon = '🟢'
+            elif value_score >= 65:
+                score_icon = '🟢'
+            elif value_score >= 50:
+                score_icon = '🟡'
+            elif value_score >= 35:
+                score_icon = '🟠'
+            else:
+                score_icon = '🔴'
+                
+            markdown += f"""**价值投资评分**: {value_score}/100 {score_icon}
+
+"""
+            
+            # 投资建议
+            rec = value_analysis.get('recommendation', {})
+            if rec:
+                markdown += f"""**投资建议**: {rec.get('action', 'N/A')} {rec.get('icon', '⚪')}
+
+**策略**: {rec.get('strategy', '')}
+
+---
+
+"""
+        
+        # 价值点评
+        if value_analysis:
+            markdown += f"""**价值点评**: {value_analysis.get('summary', '暂无')}
 
 ---
 
@@ -266,48 +322,64 @@ class ReportFormatter:
         financial: Dict,
         technical: Dict,
         valuation: Dict,
-        risk: Dict
+        risk: Dict,
+        value: Optional[Dict] = None
     ) -> Dict[str, Any]:
-        """计算综合评级"""
+        """
+        计算综合评级
+        
+        价值投资理念优先：
+        - 价值投资评分权重 50%
+        - 财务评分 25%
+        - 风险评分 15%
+        - 技术面 10%
+        """
         score = 0
         max_score = 100
         
-        # 财务评分 (40 分)
-        financial_score = financial.get('health_score', 50)
-        score += financial_score * 0.4
+        # 1. 价值投资评分（50 分）- 最高权重
+        if value:
+            value_score = value.get('value_score', 50)
+            score += value_score * 0.5
+        else:
+            # 没有价值分析时，用估值分析代替
+            valuation_level = valuation.get('valuation_level', '合理')
+            if '低估' in valuation_level:
+                score += 40
+            elif '偏低' in valuation_level:
+                score += 35
+            elif '合理' in valuation_level:
+                score += 25
+            elif '偏高' in valuation_level:
+                score += 15
+            else:
+                score += 10
         
-        # 技术面评分 (20 分)
-        trend_type = technical.get('trend', {}).get('type', '震荡')
-        if trend_type == '多头':
-            score += 20
-        elif trend_type == '空头':
-            score += 0
-        else:
-            score += 10
-            
-        # 估值评分 (25 分)
-        valuation_level = valuation.get('valuation_level', '合理')
-        if '低估' in valuation_level:
-            score += 25
-        elif '偏低' in valuation_level:
-            score += 20
-        elif '合理' in valuation_level:
-            score += 15
-        elif '偏高' in valuation_level:
-            score += 5
-        else:
-            score += 0
-            
-        # 风险扣分 (15 分)
+        # 2. 财务评分（25 分）
+        financial_score = financial.get('health_score', 50)
+        score += financial_score * 0.25
+        
+        # 3. 风险评分（15 分）
         risk_level = risk.get('level', '低风险')
         if '极低' in risk_level:
             score += 15
         elif '低' in risk_level:
             score += 12
         elif '中等' in risk_level:
-            score += 5
+            score += 8
+        elif '高' in risk_level:
+            score += 3
         else:
             score += 0
+            
+        # 4. 技术面评分（10 分）- 最低权重（价值投资不看重短期走势）
+        trend_type = technical.get('trend', {}).get('type', '震荡')
+        if trend_type == '多头':
+            score += 10
+        elif trend_type == '空头':
+            score += 5  # 空头可能是买入机会
+        else:
+            score += 7
             
         # 确定评级
         if score >= 85:

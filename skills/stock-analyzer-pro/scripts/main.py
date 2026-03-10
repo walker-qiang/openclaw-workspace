@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Any
 # 添加父目录到路径
 sys.path.insert(0, '/home/admin/.openclaw/workspace/skills/stock-analyzer-pro')
 
-from scripts.data_sources.akshare_cn import AKShareDataSource
+from scripts.data_sources.multi_source import MultiSourceDataSource
 from scripts.data_sources.yfinance_us import YFinanceDataSource
 from scripts.data_sources.fund_cn import FundDataSource
 from scripts.analysis.financial import FinancialAnalyzer
@@ -29,7 +29,7 @@ class StockAnalyzerPro:
     """股票/基金分析器主类"""
     
     def __init__(self):
-        self.akshare = AKShareDataSource()
+        self.data_source = MultiSourceDataSource()
         self.yfinance = YFinanceDataSource()
         self.fund = FundDataSource()
         self.formatter = ReportFormatter()
@@ -85,7 +85,7 @@ class StockAnalyzerPro:
         if market == 'us_stock':
             datasource = self.yfinance
         else:
-            datasource = self.akshare
+            datasource = self.data_source
             
         # 获取基础数据
         print(f"📊 正在分析 {code}...")
@@ -95,11 +95,14 @@ class StockAnalyzerPro:
         if not quote_data:
             return {"error": f"无法获取 {code} 的行情数据"}
             
-        # 1.5 获取 52 周高低点
-        high_52w, low_52w = datasource.get_52week_range(code)
-        if high_52w and low_52w:
-            quote_data['high_52w'] = high_52w
-            quote_data['low_52w'] = low_52w
+        # 1.5 52 周高低点已在数据源中获取并验证
+        # 如果数据源返回的 52 周数据为空，尝试从历史数据计算
+        if not quote_data.get('high_52w') or not quote_data.get('low_52w'):
+            if hasattr(datasource, 'get_52week_range'):
+                high_52w, low_52w = datasource.get_52week_range(code)
+                if high_52w and low_52w:
+                    quote_data['high_52w'] = high_52w
+                    quote_data['low_52w'] = low_52w
             
         # 2. 获取财务数据
         financial_data = datasource.get_financials(code)
