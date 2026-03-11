@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
+# DEPRECATED — 请使用 push.py 代替。本文件保留仅供参考。
 """
-News Collector - Push to Feishu Doc
-Fetch news and create/update Feishu document
+[DEPRECATED] News Collector - Push to Feishu Doc
+→ 替代方案：python3 push.py
+
+本脚本存在以下问题：
+  - 使用 feishu_doc create --content（content 不会实际写入）
+  - 硬编码 /home/admin 路径
 """
 
 import os

@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
+# DEPRECATED — 请使用 generate_news.py + push.py 代替。本文件保留仅供参考。
 """
-Fetch Middle East news and send via Feishu
-Usage: python fetch_news.py [--interval 5]
+[DEPRECATED] Fetch Middle East news and send via Feishu
+→ 替代方案：python3 push.py
+
+本脚本为早期版本，功能已被 generate_news.py + push.py 覆盖。
 """
 
 import os

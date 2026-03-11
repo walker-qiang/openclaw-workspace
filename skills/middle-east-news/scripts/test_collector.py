@@ -13,7 +13,7 @@ import urllib.parse
 import re
 from datetime import datetime
 
-SEARXNG_URL = "http://localhost:8080"
+SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://localhost:8080")
 
 # Categories with optimized queries (Chinese + English for coverage)
 CATEGORIES = {

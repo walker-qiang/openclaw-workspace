@@ -2,8 +2,8 @@
 
 _Learn about the person you're helping. Update this as you go._
 
-- **Name:** (待填写)
-- **What to call them:** (待填写)
+- **Name:** 行者
+- **What to call them:** 你
 - **Pronouns:** _(optional)_
 - **Timezone:** Asia/Shanghai (UTC+8)
 - **Notes:** 

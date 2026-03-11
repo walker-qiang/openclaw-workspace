@@ -47,7 +47,7 @@ def get_lunar_date():
                 lunar = data.get("data", {}).get("lunar", "") or data.get("lunar", "") or data.get("cn_lunar", "")
                 if lunar:
                     return lunar
-        except:
+        except Exception:
             continue
     
     # Final fallback: calculate approximate lunar date
@@ -164,7 +164,7 @@ def fetch_searxng(query):
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode())
             return data.get("results", [])
-    except:
+    except Exception:
         return []
 
 def clean_html(text):
@@ -187,7 +187,7 @@ def extract_date_from_html(html):
         try:
             return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)),
                           int(match.group(4)), int(match.group(5)))
-        except:
+        except ValueError:
             pass
     
     # Date only (YYYY-MM-DD)
@@ -195,7 +195,7 @@ def extract_date_from_html(html):
     if match:
         try:
             return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)))
-        except:
+        except ValueError:
             pass
     
     # US format (MM/DD/YYYY)
@@ -203,7 +203,7 @@ def extract_date_from_html(html):
     if match:
         try:
             return datetime(int(match.group(3)), int(match.group(1)), int(match.group(2)))
-        except:
+        except ValueError:
             pass
     
     # Chinese format
@@ -211,7 +211,7 @@ def extract_date_from_html(html):
     if match:
         try:
             return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)))
-        except:
+        except ValueError:
             pass
     
     # English relative time
@@ -220,7 +220,7 @@ def extract_date_from_html(html):
         try:
             hours_ago = int(hour_match.group(1))
             return datetime.now() - timedelta(hours=hours_ago)
-        except:
+        except ValueError:
             pass
     
     minute_match = re.search(r'(\d+)\s*minutes?\s*ago', html, re.IGNORECASE)
@@ -228,7 +228,7 @@ def extract_date_from_html(html):
         try:
             mins_ago = int(minute_match.group(1))
             return datetime.now() - timedelta(minutes=mins_ago)
-        except:
+        except ValueError:
             pass
     
     # Chinese relative time
@@ -375,7 +375,7 @@ def fetch_article_content(url, timeout=5):
             return clean_html(paragraphs[0]), extract_date_from_html(html)
         
         return "", extract_date_from_html(html)
-    except:
+    except Exception:
         return "", None
 
 def generate_summary(title, content, category):

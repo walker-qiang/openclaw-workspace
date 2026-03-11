@@ -1,22 +1,23 @@
 #!/bin/bash
-# 新闻推送触发脚本
-# 用途：被 cron 调用，触发新闻推送流程
+# 新闻推送触发脚本（供 cron 调用，写入触发文件等待 agent 处理）
+#
+# 环境变量：
+#   OPENCLAW_WORKSPACE  工作区路径（默认 $HOME/.openclaw/workspace）
 
 set -e
 
-WORKSPACE="/home/admin/.openclaw/workspace"
+WORKSPACE="${OPENCLAW_WORKSPACE:-$HOME/.openclaw/workspace}"
 LOG_FILE="$WORKSPACE/memory/news_push.log"
+TRIGGER_FILE="$WORKSPACE/.trigger_news_push"
+
+mkdir -p "$(dirname "$LOG_FILE")"
 
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
 }
 
-log "========================================="
-log "📰 新闻推送触发"
-log "========================================="
+log "📰 News push triggered"
 
-# 创建触发文件，包含推送请求
-TRIGGER_FILE="$WORKSPACE/.trigger_news_push"
 cat > "$TRIGGER_FILE" << EOF
 {
   "action": "push_news",
@@ -25,7 +26,4 @@ cat > "$TRIGGER_FILE" << EOF
 }
 EOF
 
-log "✅ 触发文件已创建：$TRIGGER_FILE"
-log "等待 OpenClaw agent 处理..."
-
-# 脚本退出，由 OpenClaw agent 处理后续流程
+log "✅ Trigger file created: $TRIGGER_FILE"

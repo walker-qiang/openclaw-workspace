@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
+# DEPRECATED — 请使用 push.py 代替。本文件保留仅供参考。
 """
-每日新闻自动推送脚本
-用法：python3 auto_push.py
-功能：生成新闻 → 创建飞书文档 → 推送链接
+[DEPRECATED] 每日新闻自动推送脚本
+→ 替代方案：python3 push.py
+
+本脚本只输出推送指令文本，不实际执行飞书操作。
 """
 
 import os

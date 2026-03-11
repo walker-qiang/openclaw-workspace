@@ -1,30 +1,18 @@
 #!/bin/bash
-# 新闻推送脚本 - 每 5 分钟执行一次
-# 用法：./news_push_5min.sh
+# 新闻推送脚本（workspace 层入口）
+# 代理到 skills/middle-east-news/scripts/daily_push.sh
+#
+# 环境变量（均有默认值）：
+#   OPENCLAW_WORKSPACE  工作区路径
+#   OPENCLAW_BIN        openclaw 二进制路径
+#   SEARXNG_URL         SearXNG 地址
+#   FEISHU_USER_ID      飞书用户 open_id
 
 set -e
 
-WORKSPACE="/home/admin/.openclaw/workspace"
-SKILL_DIR="$WORKSPACE/skills/middle-east-news"
-OUTPUT_FILE="/tmp/news_brief_5min.md"
-DOC_TITLE="📰 全球要闻简报 - $(date +'%Y-%m-%d %H:%M')"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-cd "$SKILL_DIR"
+export OPENCLAW_WORKSPACE="${OPENCLAW_WORKSPACE:-$WORKSPACE_ROOT}"
 
-# 生成新闻
-python3 scripts/generate_news.py
-
-# 读取新闻内容
-NEWS_CONTENT=$(cat /tmp/news_brief.md)
-
-# 创建飞书文档（使用 openclaw message 发送到当前会话）
-# 这里通过 openclaw sessions_send 发送到主会话
-openclaw sessions send --label "main" "📰 **5 分钟新闻更新**
-
-_更新时间：$(date +'%Y-%m-%d %H:%M')_
-
-新闻已生成，共 25 条精选新闻。
-
-（文档创建功能需要额外配置，当前仅通知）"
-
-echo "[$(date)] News push completed"
+exec "$WORKSPACE_ROOT/skills/middle-east-news/scripts/daily_push.sh" "$@"
