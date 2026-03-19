@@ -12,7 +12,6 @@
 import os
 import sys
 import re
-import json
 import time
 import subprocess
 from datetime import datetime

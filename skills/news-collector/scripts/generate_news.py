@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-News Collector v8.0
-- Config-driven: sources, keywords, quotes loaded from config.json
-- Parallel fetching via ThreadPoolExecutor
-- Automatic retry on network failures
-- Unified category fetching (no duplicate military logic)
-- Dynamic date (no hardcoded lunar calendar)
+News Collector v9.0
+- Thread-safe stats via threading.Lock
+- Parallel article content fetching (fixes N+1 bottleneck)
+- Category-level parallelism (all 5 categories fetched concurrently)
+- fetch_searxng uses retry + stats tracking
+- Dynamic lunar calendar date via cnlunar
+- Config-driven from config.json
 """
 
 import os
 import re
 import json
 import time
+import threading
 import urllib.request
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -25,8 +27,12 @@ NEWS_OUTPUT = os.environ.get("NEWS_OUTPUT", "/tmp/news_brief.md")
 
 
 def load_config():
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"ERROR: Failed to load config from {CONFIG_PATH}: {e}")
+        raise SystemExit(1)
 
 
 CFG = load_config()
@@ -45,8 +51,13 @@ ARTICLE_TIMEOUT = CFG["article_timeout"]
 RETRY_ATTEMPTS = CFG["retry_attempts"]
 RETRY_DELAY = CFG["retry_delay_seconds"]
 
-# Fetch stats for final summary
 _stats = {"success": 0, "failed": 0, "retried": 0}
+_stats_lock = threading.Lock()
+
+
+def _inc_stat(key):
+    with _stats_lock:
+        _stats[key] += 1
 
 
 # ---------------------------------------------------------------------------
@@ -66,30 +77,29 @@ def _do_fetch(url, timeout):
 def fetch_with_retry(url, timeout=None, retries=None):
     timeout = timeout or FETCH_TIMEOUT
     retries = retries if retries is not None else RETRY_ATTEMPTS
-    last_err = None
     for attempt in range(1 + retries):
         try:
             data = _do_fetch(url, timeout)
-            _stats["success"] += 1
+            _inc_stat("success")
             return data
-        except Exception as e:
-            last_err = e
+        except Exception:
             if attempt < retries:
-                _stats["retried"] += 1
+                _inc_stat("retried")
                 time.sleep(RETRY_DELAY)
-    _stats["failed"] += 1
+    _inc_stat("failed")
     return None
 
 
 def fetch_searxng(query):
+    params = urllib.parse.urlencode({"q": query, "format": "json"})
+    url = f"{SEARXNG_URL}/search?{params}"
+    raw = fetch_with_retry(url, timeout=FETCH_TIMEOUT, retries=1)
+    if not raw:
+        return []
     try:
-        params = urllib.parse.urlencode({"q": query, "format": "json"})
-        url = f"{SEARXNG_URL}/search?{params}"
-        req = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as resp:
-            data = json.loads(resp.read().decode())
-            return data.get("results", [])
-    except Exception:
+        data = json.loads(raw)
+        return data.get("results", [])
+    except (json.JSONDecodeError, ValueError):
         return []
 
 
@@ -136,13 +146,27 @@ def is_recent(date, hours=24):
 
 
 # ---------------------------------------------------------------------------
+# Lunar calendar helper
+# ---------------------------------------------------------------------------
+
+def get_lunar_date_str():
+    """Return today's lunar date string, e.g. '二月初一'. Falls back gracefully."""
+    try:
+        import cnlunar
+        lunar = cnlunar.Lunar(datetime.now())
+        month = lunar.lunarMonthCn.replace("小", "").replace("大", "")
+        return f"{month}{lunar.lunarDayCn}"
+    except Exception:
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # Classification
 # ---------------------------------------------------------------------------
 
 def classify_content(title, content=""):
     text = (title + " " + content).lower()
 
-    # Military takes precedence
     if any(kw.lower() in text for kw in CATEGORY_KEYWORDS["军事"]):
         return "军事"
 
@@ -160,9 +184,6 @@ def validate_ai_news(title, content=""):
     if not any(kw.lower() in text for kw in AI_MUST_HAVE):
         return False
     if any(kw in text for kw in AI_MUST_NOT_HAVE):
-        return False
-    tutorial_patterns = ["教程", "指南", "如何使用", "怎么使用", "free", "免费", "下载", "app"]
-    if any(p in text for p in tutorial_patterns):
         return False
     return True
 
@@ -316,42 +337,59 @@ def generate_summary(title, content, category):
 
 
 # ---------------------------------------------------------------------------
-# Unified category fetching (replaces separate fetch_military_news)
+# Unified category fetching with parallel article content
 # ---------------------------------------------------------------------------
 
+def _enrich_item(item, category):
+    """Fetch article content for a single item. Designed to run in thread pool."""
+    if category == "军事":
+        if not any(kw in item["title"] for kw in CATEGORY_KEYWORDS["军事"]):
+            return None
+
+    if item["url"]:
+        content, article_date = fetch_article_content(item["url"])
+        if content and re.search(r'我们是 | 旗下 | 新媒体 | 专注于', content):
+            return None
+        item["content"] = content
+        if article_date:
+            item["date"] = article_date
+
+    return item
+
+
 def _fetch_source(source_name, url, category):
-    """Fetch a single source and return items with content. Runs in thread pool."""
+    """Fetch a single source, then parallel-enrich article content."""
     html = fetch_with_retry(url)
     if not html:
         return []
 
     items = extract_news_from_html(html, url)
-    result = []
     for item in items:
-        # For military category, require military keywords in title
-        if category == "军事":
-            if not any(kw in item["title"] for kw in CATEGORY_KEYWORDS["军事"]):
-                continue
-
         item["source"] = source_name
-        if item["url"]:
-            content, article_date = fetch_article_content(item["url"])
-            if content and re.search(r'我们是 | 旗下 | 新媒体 | 专注于', content):
-                continue
-            item["content"] = content
-            if article_date:
-                item["date"] = article_date
 
-        result.append(item)
+    # Limit candidates before fetching article details
+    candidates = items[:MAX_ITEMS * 2]
+
+    # Parallel fetch article content for candidates
+    result = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        futures = {pool.submit(_enrich_item, item, category): item for item in candidates}
+        for future in as_completed(futures):
+            try:
+                enriched = future.result()
+                if enriched is not None:
+                    result.append(enriched)
+            except Exception:
+                pass
+
     return result
 
 
-def fetch_and_classify_news(category, sources):
-    """Fetch news with parallel source fetching and strict quality control."""
+def _fetch_category(category, sources):
+    """Fetch and classify news for a single category. Designed for top-level parallelism."""
     print(f"  抓取 {category} 新闻...")
     check_hours = TIME_WINDOWS.get(category, 24)
 
-    # Parallel fetch all sources for this category
     all_items = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         futures = {
@@ -411,8 +449,17 @@ def fetch_and_classify_news(category, sources):
             seen.add(key)
             unique.append(item)
 
-    print(f"      最终获取 {len(unique)} 条 {check_hours}h 新闻")
-    return unique[:MAX_ITEMS]
+    # Generate summaries
+    for item in unique:
+        item["summary"] = generate_summary(
+            item["title"],
+            item.get("content", ""),
+            item.get("detected_category", category),
+        )
+
+    count = len(unique[:MAX_ITEMS])
+    print(f"      最终获取 {count} 条 {check_hours}h 新闻")
+    return category, unique[:MAX_ITEMS]
 
 
 def _search_ai_news(hours=48):
@@ -473,18 +520,27 @@ def fetch_all_news():
     print()
 
     news_data = {}
-    for category, sources in NEWS_SOURCES.items():
-        items = fetch_and_classify_news(category, sources)
-        for item in items:
-            item["summary"] = generate_summary(
-                item["title"],
-                item.get("content", ""),
-                item.get("detected_category", category),
-            )
-        news_data[category] = items
-        print(f"  ✅ {category}: {len(items)} 条")
+    # All categories in parallel
+    with ThreadPoolExecutor(max_workers=len(NEWS_SOURCES)) as pool:
+        futures = {
+            pool.submit(_fetch_category, cat, sources): cat
+            for cat, sources in NEWS_SOURCES.items()
+        }
+        for future in as_completed(futures):
+            cat_name = futures[future]
+            try:
+                category, items = future.result()
+                news_data[category] = items
+                print(f"  ✅ {category}: {len(items)} 条")
+            except Exception as e:
+                print(f"  ❌ {cat_name}: 失败 ({e})")
+                news_data[cat_name] = []
 
-    return news_data
+    # Preserve original category order from config
+    ordered = {}
+    for cat in NEWS_SOURCES:
+        ordered[cat] = news_data.get(cat, [])
+    return ordered
 
 
 def build_markdown(news_data):
@@ -499,8 +555,12 @@ def build_markdown(news_data):
     wisdom_idx = (now.day - 1) % len(WISDOM_QUOTES)
     wisdom = WISDOM_QUOTES[wisdom_idx]
 
+    lunar_str = get_lunar_date_str()
+
     md = ["# 📰 全球要闻简报", ""]
     md.append(f"**日期**：{now.strftime('%Y 年 %m 月 %d 日')} {weekday_str}")
+    if lunar_str:
+        md.append(f"**农历**：{lunar_str}")
     md.append("")
     md.append(f"_更新时间：{ts}_")
     md.append("")
@@ -536,15 +596,14 @@ def build_markdown(news_data):
     md.append("")
     md.append(f"**共 {total} 条精选新闻**")
     md.append("")
-
-    # Fetch statistics
     md.append(
         f"_筛选标准：权威媒体白名单 | 智能内容分类 | 严格 AI 过滤 | 24-72h 时效 | 50-80 字精炼摘要_"
     )
     md.append("")
-    md.append(
-        f"_网络统计：成功 {_stats['success']} | 重试 {_stats['retried']} | 失败 {_stats['failed']}_"
-    )
+    with _stats_lock:
+        md.append(
+            f"_网络统计：成功 {_stats['success']} | 重试 {_stats['retried']} | 失败 {_stats['failed']}_"
+        )
 
     return "\n".join(md)
 
@@ -559,7 +618,8 @@ def main():
 
     print(f"✓ 已保存到 {NEWS_OUTPUT}")
     print(f"✓ 总字符数：{len(md)}")
-    print(f"✓ 网络统计：成功 {_stats['success']} | 重试 {_stats['retried']} | 失败 {_stats['failed']}")
+    with _stats_lock:
+        print(f"✓ 网络统计：成功 {_stats['success']} | 重试 {_stats['retried']} | 失败 {_stats['failed']}")
 
     return NEWS_OUTPUT
 
