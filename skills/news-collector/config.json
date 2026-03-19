@@ -1,0 +1,102 @@
+{
+  "news_sources": {
+    "政治": [
+      ["澎湃新闻", "https://www.thepaper.cn/list_21587"],
+      ["观察者网", "https://www.guancha.cn/world/"],
+      ["联合早报", "https://www.zaobao.com.sg/news/realtime/china"],
+      ["央视新闻", "https://news.cctv.com/world/"]
+    ],
+    "经济": [
+      ["财新网", "https://www.caixin.com/"],
+      ["彭博社中文", "https://www.bloombergchina.com/"],
+      ["金融时报中文", "https://www.ftchinese.com/"],
+      ["一财网", "https://www.yicai.com/"],
+      ["21 世纪经济报道", "https://m.21jingji.com/"]
+    ],
+    "科技": [
+      ["36 氪", "https://36kr.com/"],
+      ["虎嗅", "https://www.huxiu.com/"],
+      ["钛媒体", "https://www.tmtpost.com/"]
+    ],
+    "AI": [
+      ["量子位", "https://www.qbitai.com/"],
+      ["机器之心", "https://www.jiqizhixin.com/"],
+      ["新智元", "https://www.aitecher.com/"],
+      ["AI 前线", "https://www.infoq.cn/topic/AI"]
+    ],
+    "军事": [
+      ["网易军事", "https://war.163.com/"],
+      ["新浪军事", "https://news.sina.com.cn/m/"],
+      ["腾讯军事", "https://news.qq.com/mil/"],
+      ["中国军网", "https://www.81.cn/"]
+    ]
+  },
+  "category_keywords": {
+    "军事": ["军事", "国防", "军队", "解放军", "演习", "战机", "舰艇", "导弹", "武警", "海军", "空军", "陆军", "火箭军", "美军", "以军", "伊朗", "以色列", "五角大楼", "航母", "轰炸", "空袭", "俘获", "士兵"],
+    "政治": ["国际", "外交", "选举", "政府", "总统", "总理", "会谈", "访问", "政策", "议会", "国会", "首相", "制裁", "抗议", "王毅", "中美", "议员", "委内瑞拉"],
+    "经济": ["经济", "市场", "股市", "金融", "投资", "企业", "财报", "CPI", "PPI", "通胀", "利率", "央行", "贸易", "油价", "基金", "理财", "销售额", "营收"],
+    "AI": ["AI", "人工智能", "大模型", "千问", "商汤", "智谱", "算力", "视觉", "认知", "NVIDIA", "具身", "多模态", "LLM", "GPT", "Claude", "Gemini", "DeepSeek", "Agent", "智能体"],
+    "科技": ["科技", "互联网", "数码", "通信", "芯片", "软件", "机器人", "基站", "电动车", "手机", "发布", "上市"]
+  },
+  "ai_must_have": [
+    "人工智能", "大模型", "AI ", " AI", "深度学习", "机器学习", "LLM", "GPT",
+    "DeepSeek", "Gemini", "Claude", "Copilot", "Sora", "Midjourney",
+    "AGI", "Agent", "智能体", "通义", "文心", "LangChain", "LLaMA", "OpenAI",
+    "智谱", "月之暗面", "千问", "混元", "Qwen", "生成式 AI", "AIGC",
+    "ai ", " ai", "llm", "gpt-", "gpt4", "gpt5"
+  ],
+  "ai_must_not_have": [
+    "教程", "指南", "如何使用", "怎么使用", "免费使用", "下载", "APP", "推广",
+    "化学物", "化学", "燃烧", "外星", "火星", "太空", "行星", "天文",
+    "物理", "生物", "医学", "药物", "基因", "细胞", "疫苗", "癌症",
+    "疾病", "医疗", "健康", "食品", "超市"
+  ],
+  "ai_search_queries": [
+    "人工智能 大模型",
+    "AI 技术 突破",
+    "GPT Claude Gemini DeepSeek",
+    "AI artificial intelligence news",
+    "LLM 大语言模型",
+    "AI Agent 智能体 应用"
+  ],
+  "ai_search_skip_sites": [
+    "zhihu.com", "baidu.com", "weibo.com", "toutiao.com", "csdn.net", "jianshu.com"
+  ],
+  "wisdom_quotes": [
+    "人生最大的遗憾，莫过于轻易地放弃了不该放弃的，固执地坚持了不该坚持的。",
+    "生活不是等待风暴过去，而是学会在雨中跳舞。",
+    "每一次挫折都是成长的机会，关键在于你如何选择面对。",
+    "真正的智慧不在于知道多少，而在于懂得什么最重要。",
+    "成功不是终点，失败不是终结，唯有勇气才是永恒。",
+    "与其抱怨黑暗，不如点亮一盏灯。",
+    "时间不会为任何人停留，但可以为有价值的事放慢脚步。",
+    "最好的投资，是投资自己的成长。",
+    "改变能改变的，接受不能改变的，用智慧分辨两者。",
+    "人生没有白走的路，每一步都算数。",
+    "保持好奇，保持谦逊，世界永远有值得学习的东西。",
+    "简单不是简陋，而是经过复杂后的回归。",
+    "真正的自由，是拥有说不的勇气。",
+    "善良是一种选择，更是一种力量。",
+    "今天很残酷，明天更残酷，后天很美好。"
+  ],
+  "category_icons": {
+    "政治": "🏛️",
+    "经济": "💰",
+    "军事": "⚔️",
+    "科技": "🔬",
+    "AI": "🤖"
+  },
+  "time_windows": {
+    "政治": 72,
+    "经济": 24,
+    "军事": 72,
+    "科技": 24,
+    "AI": 24
+  },
+  "max_items_per_category": 5,
+  "max_workers": 4,
+  "fetch_timeout": 8,
+  "article_timeout": 4,
+  "retry_attempts": 2,
+  "retry_delay_seconds": 1
+}

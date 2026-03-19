@@ -5,7 +5,7 @@
 
 用法：
   python3 push.py                    # 生成新闻 + 推送飞书文档
-  python3 push.py --skip-generate    # 跳过生成，直接推送已有 /tmp/news_brief.md
+  python3 push.py --skip-generate    # 跳过生成，直接推送已有的新闻文件
   python3 push.py --dry-run          # 只生成，不推送
 """
 
@@ -13,6 +13,7 @@ import os
 import sys
 import re
 import json
+import time
 import subprocess
 from datetime import datetime
 
@@ -20,8 +21,11 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 WORKSPACE = os.environ.get("OPENCLAW_WORKSPACE", os.path.join(os.path.expanduser("~"), ".openclaw", "workspace"))
 OPENCLAW_BIN = os.environ.get("OPENCLAW_BIN", "openclaw")
 FEISHU_USER_ID = os.environ.get("FEISHU_USER_ID", "")
-NEWS_FILE = "/tmp/news_brief.md"
+NEWS_FILE = os.environ.get("NEWS_OUTPUT", "/tmp/news_brief.md")
 LOG_FILE = os.path.join(WORKSPACE, "memory", "news_push.log")
+
+RETRY_ATTEMPTS = 2
+RETRY_DELAY = 2
 
 
 def log(msg):
@@ -49,8 +53,21 @@ def run_cmd(cmd, timeout=60):
         return -1, "", f"Command not found: {cmd[0]}"
 
 
+def run_cmd_with_retry(cmd, timeout=60, retries=None):
+    """Run a shell command with automatic retry on failure."""
+    retries = retries if retries is not None else RETRY_ATTEMPTS
+    for attempt in range(1 + retries):
+        code, stdout, stderr = run_cmd(cmd, timeout)
+        if code == 0:
+            return code, stdout, stderr
+        if attempt < retries:
+            log(f"  Retry {attempt + 1}/{retries} after failure: {stderr[:100]}")
+            time.sleep(RETRY_DELAY)
+    return code, stdout, stderr
+
+
 def generate_news():
-    """Run generate_news.py to produce /tmp/news_brief.md."""
+    """Run generate_news.py to produce the news file."""
     log("Step 1: Generating news...")
     code, stdout, stderr = run_cmd(
         [sys.executable, os.path.join(SCRIPT_DIR, "generate_news.py")],
@@ -74,9 +91,9 @@ def read_news_content():
 
 
 def feishu_create_doc(title):
-    """Create a Feishu doc (title only) and return doc_token."""
+    """Create a Feishu doc (title only) and return doc_token. Retries on failure."""
     log(f"Step 2: Creating Feishu doc: {title}")
-    code, stdout, stderr = run_cmd(
+    code, stdout, stderr = run_cmd_with_retry(
         [OPENCLAW_BIN, "feishu_doc", "create", "--title", title]
     )
     if code != 0:
@@ -100,19 +117,19 @@ def feishu_create_doc(title):
 
 
 def feishu_write_doc(doc_token, content):
-    """Write content to an existing Feishu doc."""
+    """Write content to an existing Feishu doc. Retries on failure."""
     log(f"Step 3: Writing content to doc {doc_token} ({len(content)} chars)")
     content_file = "/tmp/news_feishu_content.md"
     with open(content_file, "w", encoding="utf-8") as f:
         f.write(content)
 
-    code, stdout, stderr = run_cmd(
+    code, stdout, stderr = run_cmd_with_retry(
         [OPENCLAW_BIN, "feishu_doc", "write", "--doc_token", doc_token,
          "--content-file", content_file]
     )
     if code != 0:
         log(f"Write with --content-file failed, trying --content flag...")
-        code, stdout, stderr = run_cmd(
+        code, stdout, stderr = run_cmd_with_retry(
             [OPENCLAW_BIN, "feishu_doc", "write", "--doc_token", doc_token,
              "--content", content[:30000]]
         )
@@ -151,20 +168,23 @@ def feishu_verify_doc(doc_token):
     return False
 
 
-def send_doc_link(doc_token):
+def send_doc_link(doc_token, verified=True):
     """Send the document link via Feishu message."""
     doc_url = f"https://feishu.cn/docx/{doc_token}"
     ts = datetime.now().strftime("%m-%d %H:%M")
+
+    warning = "" if verified else "\n⚠️ 注意：文档内容验证未通过，请手动检查文档是否完整"
+
     msg = (
         f"📰 全球要闻简报已更新 ({ts})\n\n"
         f"📄 查看详情：{doc_url}\n\n"
-        "内容包括：政治、经济、军事、科技、AI 五大领域"
+        f"内容包括：政治、经济、军事、科技、AI 五大领域{warning}"
     )
 
     log(f"Step 5: Sending link: {doc_url}")
 
     if FEISHU_USER_ID:
-        code, stdout, stderr = run_cmd(
+        code, stdout, stderr = run_cmd_with_retry(
             [OPENCLAW_BIN, "message", "send",
              "--channel", "feishu",
              "--target", f"user:{FEISHU_USER_ID}",
@@ -175,7 +195,7 @@ def send_doc_link(doc_token):
             return True
         log(f"Direct send failed, falling back to sessions_send: {stderr[:200]}")
 
-    code, stdout, stderr = run_cmd(
+    code, stdout, stderr = run_cmd_with_retry(
         [OPENCLAW_BIN, "sessions", "send", "--label", "main", "--message", msg]
     )
     if code == 0:
@@ -183,7 +203,7 @@ def send_doc_link(doc_token):
         return True
 
     log(f"ERROR: All send methods failed. Last error: {stderr[:300]}")
-    log(f"Manual link: https://feishu.cn/docx/{doc_token}")
+    log(f"Manual link: {doc_url}")
     return False
 
 
@@ -226,9 +246,8 @@ def main():
     if not feishu_write_doc(doc_token, content):
         return 1
 
-    feishu_verify_doc(doc_token)
-
-    send_doc_link(doc_token)
+    verified = feishu_verify_doc(doc_token)
+    send_doc_link(doc_token, verified=verified)
 
     log("DONE")
     return 0
