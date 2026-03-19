@@ -146,16 +146,122 @@ def is_recent(date, hours=24):
 
 
 # ---------------------------------------------------------------------------
-# Lunar calendar helper
+# Lunar calendar — self-contained, no external dependencies
 # ---------------------------------------------------------------------------
+# Standard lookup table: one entry per lunar year (1900-2050).
+# Encoding per entry:
+#   bits 0-3  : leap month number (0 = no leap month)
+#   bit  4    : 1 if the leap month has 30 days, 0 if 29
+#   bits 5-16 : months 1-12 (bit 16 = month 1), 1 = 30 days, 0 = 29 days
+# Base date: Gregorian 1900-01-31 == Lunar 1900/正月/初一
+
+_LUNAR_INFO = [
+    0x1e4a2, 0x095c0, 0x14ae0, 0x0a9a5, 0x1a4c0, 0x1b2a0, 0x0cab4, 0x0ad40, 0x135a0, 0x0aba2,
+    0x095c0, 0x14b66, 0x149a0, 0x1a4a0, 0x1a4b5, 0x16a80, 0x1ad40, 0x15b42, 0x12b60, 0x092f7,
+    0x092e0, 0x14960, 0x16965, 0x0d4a0, 0x0da80, 0x156b4, 0x056c0, 0x12ae0, 0x0a5e2, 0x092e0,
+    0x0cac6, 0x1a940, 0x1d4a0, 0x0d535, 0x0b5a0, 0x056c0, 0x10dd3, 0x125c0, 0x191b7, 0x192a0,
+    0x1a940, 0x1b156, 0x16aa0, 0x0ad40, 0x14b74, 0x04ba0, 0x125a0, 0x1a562, 0x152a0, 0x16aa7,
+    0x0d940, 0x16aa0, 0x0a6b5, 0x09b40, 0x14b60, 0x08af3, 0x0a560, 0x15348, 0x1d2a0, 0x0d540,
+    0x15d46, 0x156a0, 0x096c0, 0x155c4, 0x14ae0, 0x0a4c0, 0x1e4c3, 0x1b2a0, 0x0b6a7, 0x0ad40,
+    0x12da0, 0x09ba5, 0x095a0, 0x149a0, 0x1a9a4, 0x1a4a0, 0x1aaa8, 0x16a80, 0x16d40, 0x12b56,
+    0x12b60, 0x09360, 0x152e4, 0x14960, 0x164ea, 0x0d4a0, 0x0da80, 0x15e86, 0x156c0, 0x12ae0,
+    0x095e5, 0x092e0, 0x0c960, 0x0e943, 0x1d4a0, 0x0d6a8, 0x0b580, 0x156c0, 0x12da5, 0x125c0,
+    0x192c0, 0x1b2a4, 0x1a940, 0x1b4a0, 0x0eaa2, 0x0ad40, 0x15767, 0x04ba0, 0x125a0, 0x19565,
+    0x152a0, 0x16940, 0x17544, 0x15aa0, 0x0aba9, 0x09740, 0x14b60, 0x0a2f6, 0x0a560, 0x15260,
+    0x0f2a4, 0x0d540, 0x15aa0, 0x0b6a2, 0x096c0, 0x14dc6, 0x149c0, 0x1a4c0, 0x1d4c5, 0x1aa60,
+    0x0b540, 0x0ed43, 0x12da0, 0x095eb, 0x095a0, 0x149a0, 0x1a176, 0x1a4a0, 0x1aa40, 0x1ba85,
+    0x16b40, 0x0ada0, 0x0ab62, 0x09360, 0x14ae7, 0x14960, 0x154a0, 0x164b5, 0x0da40, 0x15b40,
+    0x096d3,
+]
+
+_MONTH_CN = ['', '正月', '二月', '三月', '四月', '五月', '六月',
+             '七月', '八月', '九月', '十月', '冬月', '腊月']
+
+
+def _lunar_day_cn(day):
+    if day == 10:
+        return '初十'
+    if day == 20:
+        return '二十'
+    if day == 30:
+        return '三十'
+    prefix = ['初', '十', '廿']
+    digit = ['一', '二', '三', '四', '五', '六', '七', '八', '九']
+    return prefix[day // 10] + digit[(day % 10) - 1]
+
+
+def _lunar_year_days(info):
+    total = 0
+    for i in range(12):
+        total += 30 if info & (0x10000 >> i) else 29
+    if info & 0xf:
+        total += 30 if info & 0x10 else 29
+    return total
+
+
+def _compute_lunar_date(dt):
+    from datetime import date as _date
+    base = _date(1900, 1, 31)
+    target = _date(dt.year, dt.month, dt.day)
+    offset = (target - base).days
+
+    if offset < 0 or offset > 60000:
+        return ""
+
+    year_idx = 0
+    while year_idx < len(_LUNAR_INFO):
+        days = _lunar_year_days(_LUNAR_INFO[year_idx])
+        if offset < days:
+            break
+        offset -= days
+        year_idx += 1
+
+    if year_idx >= len(_LUNAR_INFO):
+        return ""
+
+    info = _LUNAR_INFO[year_idx]
+    leap = info & 0xf
+
+    month = 0
+    is_leap = False
+    for m in range(1, 13):
+        days = 30 if info & (0x10000 >> (m - 1)) else 29
+        if offset < days:
+            month = m
+            break
+        offset -= days
+
+        if m == leap:
+            leap_days = 30 if info & 0x10 else 29
+            if offset < leap_days:
+                month = m
+                is_leap = True
+                break
+            offset -= leap_days
+
+    if month == 0:
+        return ""
+
+    day = offset + 1
+    month_str = _MONTH_CN[month]
+    if is_leap:
+        month_str = '闰' + month_str
+
+    return f"{month_str}{_lunar_day_cn(day)}"
+
 
 def get_lunar_date_str():
-    """Return today's lunar date string, e.g. '二月初一'. Falls back gracefully."""
+    """Return today's lunar date, e.g. '二月初一'. Self-contained, no pip deps needed."""
     try:
         import cnlunar
         lunar = cnlunar.Lunar(datetime.now())
         month = lunar.lunarMonthCn.replace("小", "").replace("大", "")
         return f"{month}{lunar.lunarDayCn}"
+    except Exception:
+        pass
+
+    try:
+        return _compute_lunar_date(datetime.now())
     except Exception:
         return ""
 
