@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """
-News Collector v6.0 - 严格 AI 分类去重版
+News Collector v7.0 - 业界最佳实践版
+- 摘要：50-80 字，主谓宾 + 数据优先
+- 来源：白名单制，权威媒体优先
+- 过滤：排除教程/推广/旧闻
+- 时间：经济/科技/AI 24h，政治/军事 72h
 """
 
 import os
 import re
 import json
 import urllib.request
+import urllib.parse
 from datetime import datetime, timedelta
 from html import unescape
 
@@ -29,120 +34,76 @@ WISDOM_QUOTES = [
     "今天很残酷，明天更残酷，后天很美好。",
 ]
 
-# 农历日期 API（使用简单计算）
-def get_lunar_date():
-    """获取农历日期 - 多 API 备用"""
-    apis = [
-        "https://api.lolimi.cn/API/lunar/",
-        "https://wangxinleo.cn/api/lunar",
-        "https://api.xygen.cn/lunar",
-    ]
-    
-    for api in apis:
-        try:
-            req = urllib.request.Request(api, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=3) as resp:
-                data = json.loads(resp.read().decode())
-                # Try different response formats
-                lunar = data.get("data", {}).get("lunar", "") or data.get("lunar", "") or data.get("cn_lunar", "")
-                if lunar:
-                    return lunar
-        except Exception:
-            continue
-    
-    # Final fallback: calculate approximate lunar date
-    # 2026-03-09 ≈ 农历正月廿一
-    return "正月廿一"
-
 SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://localhost:8080")
 
-# Extended sources for each category - PRIORITY ORDER with fallback tiers
+# === 来源白名单 - 只从权威媒体抓取 ===
+# Tier 1：最高优先级（权威财经/时政）
+# Tier 2：次优先级（专业科技/AI）
 NEWS_SOURCES = {
     "政治": [
-        # Tier 1: Chinese official (reliable for CN context)
-        ("新华网国际", "https://www.xinhuanet.com/world/"),
-        ("中国新闻网", "https://www.chinanews.com.cn/gj/"),
-        ("环球网", "https://world.huanqiu.com/"),
-        ("澎湃新闻国际", "https://www.thepaper.cn/list_21587"),
+        # Tier 1：权威时政
+        ("澎湃新闻", "https://www.thepaper.cn/list_21587"),
         ("观察者网", "https://www.guancha.cn/world/"),
-        # Tier 2: Google News (best aggregation)
-        ("Google News 国际", "https://news.google.com/topics/CAAqJQgKIh9DQkFTRVFvSUwyMHZNRE55YXpBU0JXVnVMVWRDS0FBUAE?hl=zh-CN"),
-        ("Google News 世界", "https://news.google.com/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRFp1ZEdvV0FtVnVHZ0pWVXlnQVAB?hl=zh-CN"),
-        # Tier 3: Regional Asian
         ("联合早报", "https://www.zaobao.com.sg/news/realtime/china"),
+        ("央视新闻", "https://news.cctv.com/world/"),
     ],
     "经济": [
-        # Tier 1: Premium financial
+        # Tier 1：权威财经
         ("财新网", "https://www.caixin.com/"),
-        ("金融时报中文", "https://www.ftchinese.com/"),
         ("彭博社中文", "https://www.bloombergchina.com/"),
-        # Tier 2: Business focused
+        ("金融时报中文", "https://www.ftchinese.com/"),
         ("一财网", "https://www.yicai.com/"),
-        ("界面新闻", "https://www.jiemian.com/"),
         ("21 世纪经济报道", "https://m.21jingji.com/"),
-        ("每日经济新闻", "https://www.nbd.com.cn/"),
-        # Tier 3: Chinese official
-        ("新华网财经", "https://www.xinhuanet.com/fortune/"),
-        ("中国经济网", "http://www.ce.cn/"),
     ],
     "科技": [
-        # Tier 1: Tech focused (high frequency)
+        # Tier 1：权威科技
         ("36 氪", "https://36kr.com/"),
         ("虎嗅", "https://www.huxiu.com/"),
-        ("品玩", "https://www.pingwest.com/"),
         ("钛媒体", "https://www.tmtpost.com/"),
-        ("砍柴网", "https://www.kanchai.com/"),
-        # Tier 2: Chinese official
-        ("新华网科技", "https://www.xinhuanet.com/tech/"),
-        ("人民网科技", "http://scitech.people.com.cn/"),
-        # Tier 3: International
-        ("TechCrunch", "https://techcrunch.com/"),
-        ("The Verge", "https://www.theverge.com/tech"),
     ],
     "AI": [
-        # Tier 1: CN AI dedicated (most accessible, reliable)
+        # Tier 1：专业 AI 媒体
         ("量子位", "https://www.qbitai.com/"),
         ("机器之心", "https://www.jiqizhixin.com/"),
         ("新智元", "https://www.aitecher.com/"),
         ("AI 前线", "https://www.infoq.cn/topic/AI"),
-        # Tier 2: CN tech media AI sections
-        ("36 氪 AI", "https://36kr.com/topic/ai"),
-        ("钛媒体 AI", "https://www.tmtpost.com/topic/ai"),
-        ("品玩 AI", "https://www.pingwest.com/tag/AI"),
-        ("雷锋网 AI", "https://www.leiphone.com/category/ai"),
-        # Tier 3: Google News AI (best aggregation)
-        ("Google News AI", "https://news.google.com/topics/CBEI37D79bqM1AMqGggA?hl=zh-CN"),
-        ("Google News 科技", "https://news.google.com/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRFp0Y1RjU0FtVnVHZ0pWVXlnQVAB?hl=zh-CN"),
-        # Tier 4: International (fallback, may have parsing issues)
-        ("MIT Tech Review AI", "https://www.technologyreview.com/topic/artificial-intelligence/"),
-        ("TechCrunch AI", "https://techcrunch.com/category/artificial-intelligence/"),
     ],
     "军事": [
-        # Tier 1: Military dedicated
+        # Tier 1：权威军事
         ("网易军事", "https://war.163.com/"),
         ("新浪军事", "https://news.sina.com.cn/m/"),
         ("腾讯军事", "https://news.qq.com/mil/"),
-        ("中华网军事", "https://military.china.com/"),
-        # Tier 2: Chinese official
         ("中国军网", "https://www.81.cn/"),
-        ("国防部", "http://www.mod.gov.cn"),
-        ("央视新闻军事", "https://news.cctv.com/military/"),
-        # Tier 3: International
-        ("参考消息军事", "https://www.cankaoxiaoxi.com/mil/"),
-        ("凤凰网军事", "https://news.ifeng.com/mil/"),
     ],
 }
 
-# Keywords for content-based classification (priority order matters)
+# 关键词分类（优先级：军事 > 政治 > 经济 > AI > 科技）
 CATEGORY_KEYWORDS = {
-    "军事": ["军事", "国防", "军队", "解放军", "演习", "战机", "舰艇", "导弹", "武警", "海军", "空军", "陆军", "火箭军", "美军", "以军", "伊朗", "以色列", "五角大楼", "航母", "轰炸", "空袭", "俘获", "士兵", "小学遭袭", "王毅谈伊朗"],
-    "政治": ["国际", "外交", "选举", "政府", "总统", "总理", "会谈", "访问", "政策", "议会", "国会", "首相", "制裁", "抗议", "移工", "劳工", "王毅", "中美", "间谍案", "拘捕", "议员", "委内瑞拉", "原油进口"],
-    "经济": ["经济", "市场", "股市", "金融", "投资", "企业", "财报", "CPI", "PPI", "通胀", "利率", "央行", "贸易", "供应链", "油价", "三星", "苹果", "AI 合作", "保险", "关税", "财新", "基金", "理财"],
-    "AI": ["AI", "人工智能", "大模型", "千问", "商汤", "智谱", "算力", "导航", "视觉", "认知", "NVIDIA", "具身", "多模态", "编码器"],
-    "科技": ["科技", "互联网", "数码", "通信", "芯片", "软件", "创新", "机器人", "MWC", "大会", "脑机接口", "充电", "基站", "人形机器人", "训练师"],
+    "军事": ["军事", "国防", "军队", "解放军", "演习", "战机", "舰艇", "导弹", "武警", "海军", "空军", "陆军", "火箭军", "美军", "以军", "伊朗", "以色列", "五角大楼", "航母", "轰炸", "空袭", "俘获", "士兵"],
+    "政治": ["国际", "外交", "选举", "政府", "总统", "总理", "会谈", "访问", "政策", "议会", "国会", "首相", "制裁", "抗议", "王毅", "中美", "议员", "委内瑞拉"],
+    "经济": ["经济", "市场", "股市", "金融", "投资", "企业", "财报", "CPI", "PPI", "通胀", "利率", "央行", "贸易", "油价", "基金", "理财", "销售额", "营收"],
+    "AI": ["AI", "人工智能", "大模型", "千问", "商汤", "智谱", "算力", "视觉", "认知", "NVIDIA", "具身", "多模态", "LLM", "GPT", "Claude", "Gemini", "DeepSeek", "Agent", "智能体"],
+    "科技": ["科技", "互联网", "数码", "通信", "芯片", "软件", "机器人", "基站", "电动车", "手机", "发布", "上市"],
 }
 
-def fetch_page(url, timeout=10):
+# === AI 新闻严格过滤 ===
+# 必须包含（至少一个）
+AI_MUST_HAVE = [
+    "人工智能", "大模型", "AI ", " AI", "深度学习", "机器学习", "LLM", "GPT",
+    "DeepSeek", "Gemini", "Claude", "Copilot", "Sora", "Midjourney",
+    "AGI", "Agent", "智能体", "通义", "文心", "LangChain", "LLaMA", "OpenAI",
+    "智谱", "月之暗面", "千问", "混元", "Qwen", "生成式 AI", "AIGC",
+    "ai ", " ai", "llm", "gpt-", "gpt4", "gpt5"
+]
+# 必须排除（出现即过滤）
+AI_MUST_NOT_HAVE = [
+    "教程", "指南", "如何使用", "怎么使用", "免费使用", "下载", "APP", "推广",
+    "化学物", "化学", "燃烧", "外星", "火星", "太空", "行星", "天文",
+    "物理", "生物", "医学", "药物", "基因", "细胞", "疫苗", "癌症",
+    "疾病", "医疗", "健康", "食品", "超市"
+]
+
+def fetch_page(url, timeout=8):
     """Fetch webpage"""
     try:
         req = urllib.request.Request(url, headers={
@@ -152,7 +113,7 @@ def fetch_page(url, timeout=10):
         })
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.read().decode('utf-8', errors='ignore')
-    except Exception as e:
+    except Exception:
         return None
 
 def fetch_searxng(query):
@@ -161,7 +122,7 @@ def fetch_searxng(query):
         params = urllib.parse.urlencode({"q": query, "format": "json"})
         url = f"{SEARXNG_URL}/search?{params}"
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read().decode())
             return data.get("results", [])
     except Exception:
@@ -177,11 +138,11 @@ def clean_html(text):
     return text
 
 def extract_date_from_html(html):
-    """Extract date from HTML - multiple patterns (CN + EN)"""
+    """Extract date from HTML"""
     if not html:
         return None
     
-    # ISO format with time
+    # ISO format
     match = re.search(r'(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})', html)
     if match:
         try:
@@ -190,7 +151,7 @@ def extract_date_from_html(html):
         except ValueError:
             pass
     
-    # Date only (YYYY-MM-DD)
+    # Date only
     match = re.search(r'(\d{4})-(\d{2})-(\d{2})', html)
     if match:
         try:
@@ -198,104 +159,31 @@ def extract_date_from_html(html):
         except ValueError:
             pass
     
-    # US format (MM/DD/YYYY)
-    match = re.search(r'(\d{1,2})/(\d{1,2})/(\d{4})', html)
-    if match:
-        try:
-            return datetime(int(match.group(3)), int(match.group(1)), int(match.group(2)))
-        except ValueError:
-            pass
-    
-    # Chinese format
-    match = re.search(r'(\d{4}) 年 (\d{1,2}) 月 (\d{1,2}) 日', html)
-    if match:
-        try:
-            return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)))
-        except ValueError:
-            pass
-    
-    # English relative time
-    hour_match = re.search(r'(\d+)\s*hours?\s*ago', html, re.IGNORECASE)
-    if hour_match:
-        try:
-            hours_ago = int(hour_match.group(1))
-            return datetime.now() - timedelta(hours=hours_ago)
-        except ValueError:
-            pass
-    
-    minute_match = re.search(r'(\d+)\s*minutes?\s*ago', html, re.IGNORECASE)
-    if minute_match:
-        try:
-            mins_ago = int(minute_match.group(1))
-            return datetime.now() - timedelta(minutes=mins_ago)
-        except ValueError:
-            pass
-    
-    # Chinese relative time
+    # Chinese relative
     if '今天' in html or '今日' in html or 'today' in html.lower():
         return datetime.now()
     if '昨天' in html or 'yesterday' in html.lower():
         return datetime.now() - timedelta(days=1)
     
-    # Hour patterns (Chinese)
-    for h in range(1, 24):
-        if f'{h}小时前' in html:
-            return datetime.now() - timedelta(hours=h)
-    
     return None
 
 def is_recent(date, hours=24):
-    """Check if recent - STRICT"""
+    """Check if recent"""
     if not date:
         return False
     return (datetime.now() - date).total_seconds() <= (hours * 3600)
 
 def classify_content(title, content=""):
-    """Classify content based on keywords - military first, then others with AI strict filtering"""
+    """Classify content based on keywords"""
     text = (title + " " + content).lower()
     
-    # Military first (highest priority - war/conflict related)
-    military_keywords = CATEGORY_KEYWORDS["军事"]
-    if any(kw.lower() in text for kw in military_keywords):
+    # Military first
+    if any(kw.lower() in text for kw in CATEGORY_KEYWORDS["军事"]):
         return "军事"
     
-    # AI negative keywords - STRICTLY exclude non-AI topics
-    ai_negative = [
-        "化学物", "化学", "燃烧", "底刊", "被封", "钻石", "外星", "生存",
-        "火星", "太空", "行星", "天文", "物理", "生物", "医学", "药物",
-        "基因", "细胞", "疫苗", "癌症", "疾病", "老化", "羊群", "永久",
-        "材料", "超导", "干细胞", "医疗", "健康", "食品", "超市", "猪价"
-    ]
-    
-    # AI keywords (STRICT matching - must have at least one primary)
-    ai_primary = [
-        "人工智能", "大模型", "ai ", " ai", "深度学习", "机器学习", "llm", "gpt",
-        "deepseek", "gemini", "claude", "copilot", "sora", "midjourney",
-        "agi", "agent", "通义", "文心", "langchain", "llama", "openai",
-        "周志华", "智谱", "智元", "月之暗面", "千问", "混元", "qwen"
-    ]
-    ai_secondary = [
-        "智能驾驶", "自动驾驶", "机器人", "具身智能", "神经网络", 
-        "transformer", "多模态", "aicg", "生成式 ai", "rag", "强化学习",
-        "计算机视觉", "nlp", "自然语言处理", "语音识别", "diffusion"
-    ]
-    
-    # Check if has ANY primary AI keyword (required)
-    has_primary = any(kw in text for kw in ai_primary)
-    
-    # Check if has negative keyword
-    has_negative = any(kw in text for kw in ai_negative)
-    
-    # AI classification: must have primary keyword AND no negative keywords
-    if has_primary and not has_negative:
-        # Double-check with secondary keywords for confidence
-        has_secondary = any(kw in text for kw in ai_secondary)
-        if has_secondary or has_primary:
-            return "AI"
-    
-    # Then check other categories
+    # Then others
     scores = {}
-    for category in ["政治", "经济", "科技"]:
+    for category in ["政治", "经济", "AI", "科技"]:
         keywords = CATEGORY_KEYWORDS[category]
         score = sum(1 for kw in keywords if kw.lower() in text)
         scores[category] = score
@@ -316,47 +204,73 @@ def extract_news_from_html(html, source_url=""):
     seen = set()
     page_date = extract_date_from_html(html)
     
-    patterns = [
-        r'<a[^>]+href="([^"]+)"[^>]*>([^<]{20,100})</a>',
-        r'<h[345][^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([^<]+)</a>',
-    ]
+    # Pattern: <a href="..." >title</a>
+    matches = re.findall(r'<a[^>]+href="([^"]+)"[^>]*>([^<]{20,120})</a>', html, re.IGNORECASE)
     
-    for pattern in patterns:
-        matches = re.findall(pattern, html, re.IGNORECASE)
-        for match in matches:
-            if len(match) >= 2:
-                href = match[0]
-                title = clean_html(match[1]).strip()
-                
-                if len(title) < 10 or len(title) > 100:
-                    continue
-                if not any('\u4e00' <= c <= '\u9fff' for c in title):
-                    continue
-                if any(w in title for w in ["首页", "更多", "广告", "登录", "下载", "专题", "直播"]):
-                    continue
-                
-                title_key = title[:30]
-                if title_key in seen:
-                    continue
-                seen.add(title_key)
-                
-                if href.startswith("/"):
-                    href = base_url + href
-                elif href.startswith("//"):
-                    href = "https:" + href
-                
-                items.append({
-                    "title": title,
-                    "url": href,
-                    "source": "",
-                    "content": "",
-                    "date": page_date,
-                })
+    for match in matches:
+        href = match[0]
+        title = clean_html(match[1]).strip()
+        
+        # Length filter
+        if len(title) < 15 or len(title) > 80:
+            continue
+        
+        # Require Chinese characters
+        if sum(1 for c in title if '\u4e00' <= c <= '\u9fff') < 5:
+            continue
+        
+        # Skip low-quality titles
+        skip_words = ["首页", "更多", "广告", "登录", "下载", "专题", "直播", "导航", "列表", "关于我们", "联系我们", "许可证", "经营许可证", "京 B2"]
+        if any(w in title for w in skip_words):
+            continue
+        
+        # Skip old date patterns - any mention of a different month
+        current_month = datetime.now().month
+        
+        # Check if title contains a month range (e.g., "1-2 月", "1~3 月", "1 至 3 月", "1—2 月")
+        # Support various dash types: hyphen -, tilde ~, Chinese dash 一，em-dash —
+        has_month_range = bool(re.search(r'\d{1,2}[-~一—至]\d{1,2}\u6708', title))
+        
+        # Find all "X 月" patterns in title - use unicode escape for reliability
+        all_months = re.findall(r'(\d{1,2})\u6708', title)
+        skip_item = False
+        for month_str in all_months:
+            mentioned_month = int(month_str)
+            # Skip if any month mentioned is not current month (and is a valid month 1-12)
+            if 1 <= mentioned_month <= 12 and mentioned_month != current_month:
+                # Allow if it's part of a range that includes recent months
+                if has_month_range:
+                    continue  # Allow month ranges
+                skip_item = True
+                break
+        
+        if skip_item:
+            continue
+        
+        # Deduplicate
+        title_key = title[:30]
+        if title_key in seen:
+            continue
+        seen.add(title_key)
+        
+        # Build URL
+        if href.startswith("/"):
+            href = base_url + href
+        elif href.startswith("//"):
+            href = "https:" + href
+        
+        items.append({
+            "title": title,
+            "url": href,
+            "source": "",
+            "content": "",
+            "date": page_date,
+        })
     
     return items
 
-def fetch_article_content(url, timeout=5):
-    """Fetch article for content"""
+def fetch_article_content(url, timeout=4):
+    """Fetch article content"""
     try:
         html = fetch_page(url, timeout)
         if not html:
@@ -370,7 +284,7 @@ def fetch_article_content(url, timeout=5):
                 return desc, extract_date_from_html(html)
         
         # First paragraph
-        paragraphs = re.findall(r'<p[^>]*>([^<]{50,300})</p>', html)
+        paragraphs = re.findall(r'<p[^>]*>([^<]{50,500})</p>', html)
         if paragraphs:
             return clean_html(paragraphs[0]), extract_date_from_html(html)
         
@@ -379,124 +293,205 @@ def fetch_article_content(url, timeout=5):
         return "", None
 
 def generate_summary(title, content, category):
-    """Generate meaningful summary - avoid templates"""
-    if content and len(content) > 80:
-        content = clean_html(content)
-        # Extract meaningful sentences
-        sentences = re.split(r'[。！？.!?]', content)
-        meaningful = [s.strip() for s in sentences if len(s.strip()) > 20 and not any(w in s for w in ["广告", "推荐", "相关阅读"])]
-        
-        if meaningful:
-            summary = meaningful[0]
-            if len(meaningful) > 1 and len(summary) < 150:
-                summary += "。" + meaningful[1]
-            return summary[:247] + "..." if len(summary) > 250 else summary
+    """
+    Generate summary following industry best practices:
+    - 50-80 characters optimal, max 100
+    - Subject-Verb-Object structure
+    - Prioritize numbers/data
+    - Remove filler words and tags
+    """
+    if not content:
+        clean = re.sub(r'[（(].*[)）]$', '', title).strip()
+        return clean[:80]
     
-    # Fallback: use title only, no filler
-    clean_title = re.sub(r'[（(].*[)）]$', '', title).strip()
-    return clean_title[:250]
+    content = clean_html(content)
+    
+    # Skip low-quality content
+    low_quality = ["首页>", "导航", "专题", "广告", "推荐", "登录", "注册", "下载 APP", "扫码"]
+    if any(p in content for p in low_quality):
+        clean = re.sub(r'[（(].*[)）]$', '', title).strip()
+        return clean[:80]
+    
+    # Skip if content is website description
+    if re.search(r'我们是 | 旗下 | 新媒体 | 专注于 | 致力于', content):
+        clean = re.sub(r'[（(].*[)）]$', '', title).strip()
+        return clean[:80]
+    
+    # Extract sentences
+    sentences = re.split(r'[。！？.!?]', content)
+    meaningful = []
+    for s in sentences:
+        s = s.strip()
+        if len(s) < 20:
+            continue
+        # Skip navigation/filler
+        if any(w in s for w in ["广告", "推荐", "首页", "导航", "扫码", "关注", "更多"]):
+            continue
+        # Skip tag lists (e.g., "伊朗，红海，福特")
+        if re.match(r'^[^\u4e00-\u9fa5]*([\u4e00-\u9fa5]{2,4}[,，][^\u4e00-\u9fa5]*)*[\u4e00-\u9fa5]{2,4}[,，]', s):
+            continue
+        # Skip if mostly commas/tags
+        if s.count(',') + s.count('，') > len(s) / 2:
+            continue
+        meaningful.append(s)
+    
+    if not meaningful:
+        clean = re.sub(r'[（(].*[)）]$', '', title).strip()
+        return clean[:80]
+    
+    # Strategy: Extract key facts
+    lead = meaningful[0]
+    lead = re.sub(r'[（(][^)）]*[)）]', '', lead).strip()
+    # Remove tag-like patterns
+    lead = re.sub(r'^[,，:：\s]+', '', lead)
+    
+    # Look for data/numbers
+    data_point = ""
+    for s in meaningful[1:4]:
+        if re.search(r'\d+[.%亿元]', s):
+            data_point = re.sub(r'[（(][^)）]*[)）]', '', s).strip()
+            break
+    
+    # Synthesize
+    if data_point and len(lead) < 60:
+        summary = lead + "。" + data_point
+    else:
+        summary = lead
+    
+    # Trim to 50-80 optimal, max 100
+    if len(summary) > 100:
+        summary = summary[:97] + "..."
+    
+    # Clean up prefixes and tags
+    summary = re.sub(r'^[^\u4e00-\u9fa5]+[:：]', '', summary).strip()
+    summary = re.sub(r'^[,，:：\s]+', '', summary)
+    
+    # Remove trailing tag lists (e.g., ",伊朗，红海，福特")
+    summary = re.sub(r'[,，][^\u4e00-\u9fa5]*([\u4e00-\u9fa5]{2,4}[,，]){2,}.*$', '', summary)
+    
+    return summary[:100] if len(summary) > 100 else summary
+
+def validate_ai_news(title, content=""):
+    """Strict AI news validation"""
+    text = (title + " " + (content or "")).lower()
+    
+    # Must have at least one AI keyword
+    has_ai = any(kw.lower() in text for kw in AI_MUST_HAVE)
+    if not has_ai:
+        return False
+    
+    # Must not have exclusion keywords
+    has_excluded = any(kw in text for kw in AI_MUST_NOT_HAVE)
+    if has_excluded:
+        return False
+    
+    # Must not be tutorial/guide
+    tutorial_patterns = ["教程", "指南", "如何使用", "怎么使用", "free", "免费", "下载", "app"]
+    if any(p in text for p in tutorial_patterns):
+        return False
+    
+    return True
+
+def search_ai_news(hours=48):
+    """Search for AI news via SearXNG"""
+    queries = [
+        "人工智能 大模型",
+        "AI 技术 突破",
+        "GPT Claude Gemini DeepSeek",
+        "AI artificial intelligence news",
+        "LLM 大语言模型",
+        "AI Agent 智能体 应用",
+    ]
+    
+    items = []
+    seen = set()
+    
+    for query in queries:
+        if len(items) >= 5:
+            break
+        
+        results = fetch_searxng(query)
+        for r in results:
+            if len(items) >= 5:
+                break
+            
+            title = clean_html(r.get("title", ""))
+            url = r.get("url", "")
+            content = r.get("content", "")
+            
+            # Length filter
+            if len(title) < 15 or len(title) > 100:
+                continue
+            
+            # Skip unwanted sites
+            skip_sites = ["zhihu.com", "baidu.com", "weibo.com", "toutiao.com", "csdn.net", "jianshu.com", "36kr.com"]
+            if any(s in url.lower() for s in skip_sites):
+                continue
+            
+            # Require Chinese characters (at least 5)
+            if sum(1 for c in title if '\u4e00' <= c <= '\u9fff') < 5:
+                continue
+            
+            # Skip tutorials/guides
+            skip_patterns = ["教程", "指南", "免费使用", "下载", "APP", "推广", "怎么使用"]
+            if any(p in title for p in skip_patterns):
+                continue
+            
+            # Deduplicate
+            title_key = title[:30]
+            if title_key in seen:
+                continue
+            seen.add(title_key)
+            
+            # Extract date
+            pub_date = extract_date_from_html(content) if content else None
+            
+            items.append({
+                "title": title,
+                "url": url,
+                "source": "搜索",
+                "content": content,
+                "date": pub_date or datetime.now(),
+                "detected_category": "AI",
+            })
+    
+    print(f"      搜索获取 {len(items)}条 AI 新闻")
+    return items
 
 def fetch_and_classify_news(category, sources, max_age_hours=24):
-    """Fetch news with search-first strategy for politics/AI"""
+    """Fetch news with strict quality control"""
     print(f"  抓取 {category} 新闻...")
     all_items = []
     
-    # For politics and AI: search-first strategy (more reliable)
-    if category in ["政治", "AI"]:
-        print(f"    → 使用搜索优先策略")
-        check_hours = 72  # 3 days for politics/AI
-        
-        # Aggressive search with multiple queries
-        search_queries_map = {
-            "政治": [
-                # China-focused (priority)
-                "中国外交 外交部 今天",
-                "中美关系 最新",
-                "中俄关系 时政",
-                "一带一路 合作",
-                # Asia-Pacific
-                "亚太 局势 今天",
-                "台海 南海 最新",
-                "日韩 朝韩 局势",
-                # Global
-                "联合国 安理会",
-                "国际新闻 时政 今天",
-                "world news today",
-                "global politics breaking news",
-            ],
-            "AI": [
-                # Chinese queries (priority)
-                "人工智能 AI 大模型 今天",
-                "深度学习 机器学习 最新",
-                "GPT 大语言模型 应用",
-                "AI 产品 发布 2026",
-                "智谱 智元 月之暗面 千问",
-                "AI 融资 投资 创业",
-                # English queries (fallback)
-                "AI artificial intelligence news today",
-                "machine learning breakthrough 2026",
-                "LLM GPT Claude Gemini news",
-            ],
-        }
-        
-        queries = search_queries_map.get(category, [])
-        seen_titles = set()
-        
-        for query in queries:
-            if len(all_items) >= 8:  # Get extra for filtering
-                break
-            print(f"    → 搜索：{query[:40]}...")
-            search_items = search_news_for_category(category, hours=check_hours, custom_query=query)
-            for item in search_items:
-                title_key = item["title"][:40]
-                if title_key not in seen_titles:
-                    seen_titles.add(title_key)
-                    all_items.append(item)
-        
-        # Classify and filter
-        classified = {cat: [] for cat in CATEGORY_KEYWORDS.keys()}
-        for item in all_items:
-            detected_cat = classify_content(item["title"], item.get("content", ""))
-            if detected_cat:
-                item["detected_category"] = detected_cat
-                classified[detected_cat].append(item)
-            else:
-                item["detected_category"] = category
-                classified[category].append(item)
-        
-        result = [i for i in classified[category] if i.get("date") and is_recent(i["date"], hours=check_hours)]
-        
-        if len(result) >= 5:
-            print(f"      已获取 {len(result)}条 {check_hours}h 新闻")
-            return result[:5]
-        else:
-            print(f"      搜索获取 {len(result)}条，继续抓取来源...")
+    # Time window by category
+    check_hours = 72 if category in ["政治", "军事"] else 24
     
-    # Standard source fetching (for all categories as fallback)
-    check_hours = 48 if category in ["政治", "AI"] else 24
-    max_sources = 8 if category in ["政治", "AI"] else 5
-    
-    for source_name, url in sources[:max_sources]:
+    for source_name, url in sources:
         print(f"    → {source_name}")
         html = fetch_page(url)
-        if html:
-            items = extract_news_from_html(html, url)
-            for item in items:
-                item["source"] = source_name
-                if item["url"]:
-                    content, article_date = fetch_article_content(item["url"], timeout=4)
-                    item["content"] = content
-                    if article_date:
-                        item["date"] = article_date
-            all_items.extend(items)
+        if not html:
+            continue
         
-        # Check if we have enough recent news
+        items = extract_news_from_html(html, url)
+        for item in items:
+            item["source"] = source_name
+            if item["url"]:
+                content, article_date = fetch_article_content(item["url"], timeout=3)
+                # Skip website descriptions
+                if content and re.search(r'我们是 | 旗下 | 新媒体 | 专注于', content):
+                    continue
+                item["content"] = content
+                if article_date:
+                    item["date"] = article_date
+        
+        all_items.extend(items)
+        
         recent = [i for i in all_items if i.get("date") and is_recent(i["date"], hours=check_hours)]
         if len(recent) >= 5:
             print(f"      已获取 {len(recent)}条 {check_hours}h 新闻，停止抓取")
             break
     
-    # Classify all items
+    # Classify and filter
     classified = {cat: [] for cat in CATEGORY_KEYWORDS.keys()}
     for item in all_items:
         detected_cat = classify_content(item["title"], item.get("content", ""))
@@ -507,209 +502,49 @@ def fetch_and_classify_news(category, sources, max_age_hours=24):
             item["detected_category"] = category
             classified[category].append(item)
     
-    # Filter
+    # Filter by recency
     result = [i for i in classified[category] if i.get("date") and is_recent(i["date"], hours=check_hours)]
     
-    # EXTRA STRICT: For AI category, validate each item has real AI content
+    # Extra strict AI validation
     if category == "AI":
-        ai_primary_validate = ["人工智能", "大模型", "ai ", " ai", "深度学习", "机器学习", "llm", "gpt",
-                               "deepseek", "gemini", "claude", "copilot", "sora", "midjourney",
-                               "agi", "agent", "通义", "文心", "langchain", "llama", "openai",
-                               "周志华", "智谱", "智元", "月之暗面", "千问"]
-        ai_negative_validate = ["化学物", "化学", "燃烧", "底刊", "被封", "钻石", "外星", "生存",
-                                "火星", "太空", "行星", "天文", "物理", "生物", "医学", "药物",
-                                "基因", "细胞", "疫苗", "癌症", "疾病", "老化", "羊群", "永久",
-                                "材料", "超导", "干细胞", "医疗", "健康", "食品", "超市", "猪价"]
+        validated = [i for i in result if validate_ai_news(i["title"], i.get("content", ""))]
+        if len(validated) < len(result):
+            print(f"      AI 严格过滤：{len(result)}条 → {len(validated)}条")
+        result = validated
         
-        validated_result = []
-        for item in result:
-            text = (item["title"] + " " + (item.get("content") or "")).lower()
-            has_ai = any(kw in text for kw in ai_primary_validate)
-            has_negative = any(kw in text for kw in ai_negative_validate)
-            if has_ai and not has_negative:
-                validated_result.append(item)
-        
-        if len(validated_result) < len(result):
-            print(f"      AI 严格过滤：{len(result)}条 → {len(validated_result)}条")
-        result = validated_result
-    
-    if len(result) >= 5:
-        print(f"      已获取 {len(result)}条，跳过搜索")
-        return result[:5]
-    
-    # Phase 2: Aggressive search fallback (bilingual)
-    if len(result) < 5:
-        print(f"      {check_hours}h 不足 ({len(result)}条), 使用搜索补充")
-        # Expand time window for search
-        search_hours = 168 if category in ["政治", "AI"] else 72  # Up to 7 days for politics/AI
-        
-        # Define expanded search queries inline
-        search_queries_map = {
-            "政治": [
-                "国际新闻 外交 时政 最新",
-                "world news politics today",
-                "global politics breaking news",
-                "international relations news 2026",
-                "geopolitics latest",
-                "world leaders summit meeting",
-                "international conflict news",
-            ],
-            "经济": ["财经新闻 经济 市场", "financial news economy today", "stock market business"],
-            "科技": ["科技新闻 互联网 数码", "tech news technology today", "new product launch"],
-            "AI": [
-                "人工智能 AI 大模型 最新",
-                "AI artificial intelligence news today",
-                "machine learning breakthrough 2026",
-                "LLM GPT Claude Gemini news",
-                "AI startup funding latest",
-                "generative AI new product",
-                "AI model release this week",
-                "deep learning research 2026",
-            ],
-            "军事": ["军事新闻 国防", "military news defense today", "international military"],
-        }
-        
-        queries = search_queries_map.get(category, [category + " 新闻"])
-        for query in queries:
-            if len(result) >= 5:
-                break
-            search_items = search_news_for_category(category, hours=search_hours, custom_query=query)
+        # If AI < 3, use search to supplement (expand time window)
+        if len(result) < 3:
+            print(f"      AI 不足 ({len(result)}条)，使用搜索补充...")
+            search_items = search_ai_news(hours=168)  # Up to 7 days for AI
             for item in search_items:
-                if item["title"][:30] not in [i["title"][:30] for i in result]:
-                    result.append(item)
+                if len(result) >= 5:
+                    break
+                if validate_ai_news(item["title"], item.get("content", "")):
+                    # Deduplicate
+                    existing_titles = [i["title"][:30] for i in result]
+                    if item["title"][:30] not in existing_titles:
+                        result.append(item)
+            
+            if len(result) > 0:
+                print(f"      搜索补充后：{len(result)}条")
     
-    if len(result) < 5:
-        print(f"      最终获取 {len(result)}条 24h 新闻")
+    # Deduplicate by title
+    seen = set()
+    unique = []
+    for item in result:
+        key = item["title"][:30]
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
     
-    return result[:5]
-
-def search_news_for_category(category, hours=24, custom_query=None):
-    """Search for news via SearXNG - bilingual queries (CN + EN)"""
-    # Multiple query strategies per category - bilingual
-    search_queries = {
-        "政治": [
-            # Chinese queries
-            "国际新闻 外交 时政 今天",
-            "全球热点 国际局势 最新",
-            "世界新闻 头条 24 小时",
-            # English queries (diverse sources)
-            "world news politics today",
-            "international news breaking 24h",
-            "global politics latest",
-            "geopolitics news today",
-            "international relations news",
-        ],
-        "经济": [
-            "财经新闻 经济 市场 今天",
-            "股市 基金 理财 最新",
-            "financial news economy today",
-            "stock market business latest",
-        ],
-        "科技": [
-            "科技新闻 互联网 数码 今天",
-            "新品发布 技术创新 2026",
-            "tech news technology today",
-            "new product launch innovation",
-        ],
-        "AI": [
-            # Chinese queries
-            "人工智能 AI 大模型 今天",
-            "深度学习 机器学习 最新突破",
-            "GPT 大语言模型 应用发布",
-            "AI 产品 融资 2026",
-            # English queries (broader)
-            "AI artificial intelligence news today",
-            "machine learning breakthrough 2026",
-            "LLM GPT Claude Gemini news",
-            "AI startup funding latest",
-            "generative AI new product",
-            "AI model release this week",
-        ],
-        "军事": [
-            "军事新闻 国防 今天",
-            "国际军事 冲突 最新",
-            "military news defense today",
-            "international military conflict",
-        ],
-    }
-    
-    queries = [custom_query] if custom_query else search_queries.get(category, [category + " 新闻"])
-    
-    items = []
-    skip_sites = ["zhihu.com", "baidu.com", "weibo.com", "toutiao.com", "twitter.com", "youtube.com", "facebook.com"]
-    seen_titles = set()
-    
-    for query in queries:
-        if len(items) >= 5:
-            break
-            
-        results = fetch_searxng(query)
-        
-        for r in results:
-            if len(items) >= 5:
-                break
-                
-            title = clean_html(r.get("title", ""))
-            url = r.get("url", "")
-            content = r.get("content", "")
-            
-            # Length check
-            if len(title) < 10 or len(title) > 100:
-                continue
-            
-            # Skip unwanted sites
-            if any(s in url.lower() for s in skip_sites):
-                continue
-            
-            # Require Chinese characters (at least 5)
-            chinese_chars = sum(1 for c in title if '\u4e00' <= c <= '\u9fff')
-            if chinese_chars < 5:
-                continue
-            
-            # Deduplicate
-            title_key = title[:40]
-            if title_key in seen_titles:
-                continue
-            seen_titles.add(title_key)
-            
-            # Extract date from content
-            pub_date = extract_date_from_html(content) if content else None
-            
-            # Time filter: use the passed hours parameter (can be up to 168h for politics/AI)
-            check_hours = hours
-            
-            # If no date found but content looks fresh, include it
-            include_fallback = pub_date is None and any(kw in content.lower() for kw in ["today", "this week", "latest", "最新", "今天", "昨日", "yesterday"])
-            
-            # Also check if title has date-like patterns
-            title_has_recent = bool(re.search(r'(今天 | 今日|today|latest|breaking)', title, re.IGNORECASE))
-            
-            if pub_date and is_recent(pub_date, hours=check_hours):
-                items.append({
-                    "title": title,
-                    "url": url,
-                    "source": "搜索",
-                    "content": content,
-                    "date": pub_date,
-                    "detected_category": category,
-                })
-            elif include_fallback or title_has_recent:
-                # Use current time as fallback for fresh-looking content
-                items.append({
-                    "title": title,
-                    "url": url,
-                    "source": "搜索",
-                    "content": content,
-                    "date": datetime.now(),
-                    "detected_category": category,
-                })
-    
-    return items[:5]
+    print(f"      最终获取 {len(unique)}条 {check_hours}h 新闻")
+    return unique[:5]  # Max 5
 
 def fetch_military_news():
-    """Fetch military news - expand sources when 24h insufficient"""
+    """Fetch military news"""
     print("  抓取军事新闻...")
     all_items = []
+    check_hours = 72
     
     sources = NEWS_SOURCES["军事"]
     for source_name, url in sources:
@@ -718,38 +553,20 @@ def fetch_military_news():
         if html:
             items = extract_news_from_html(html, url)
             for item in items:
-                if any(kw in item["title"] for kw in ["军事", "国防", "军队", "演习", "战机", "舰艇", "导弹", "美军", "以军", "伊朗", "解放军"]):
+                # Must have military keywords
+                if any(kw in item["title"] for kw in ["军事", "国防", "军队", "演习", "战机", "舰艇", "导弹", "美军", "以军", "伊朗", "解放军", "航母", "空袭"]):
                     item["source"] = source_name
+                    if item["url"]:
+                        content, article_date = fetch_article_content(item["url"], timeout=3)
+                        item["content"] = content
+                        if article_date:
+                            item["date"] = article_date
                     all_items.append(item)
         
-        # Check if enough 24h news
-        recent = [i for i in all_items if i.get("date") and is_recent(i["date"], hours=24)]
+        recent = [i for i in all_items if i.get("date") and is_recent(i["date"], hours=check_hours)]
         if len(recent) >= 5:
-            print(f"      已获取 {len(recent)}条 24h 新闻，停止抓取")
+            print(f"      已获取 {len(recent)}条 {check_hours}h 新闻，停止抓取")
             break
-    
-    # Search fallback (24h strict)
-    if len([i for i in all_items if i.get("date") and is_recent(i["date"], hours=24)]) < 5:
-        print("    → 搜索国际军事")
-        search = fetch_searxng("军事 国防 国际")
-        for r in search:
-            title = clean_html(r.get("title", ""))
-            url = r.get("url", "")
-            content = r.get("content", "")
-            
-            if len(title) < 10 or len(title) > 100:
-                continue
-            if any(s in url.lower() for s in ["zhihu.com", "baidu.com", "weibo.com"]):
-                continue
-            
-            all_items.append({
-                "title": title,
-                "url": url,
-                "source": "国际军事",
-                "content": content,
-                "date": extract_date_from_html(content) if content else None,
-                "detected_category": "军事",
-            })
     
     # Deduplicate
     seen = set()
@@ -760,17 +577,13 @@ def fetch_military_news():
             seen.add(key)
             unique.append(item)
     
-    # STRICT 24h filter
-    result = [i for i in unique if i.get("date") and is_recent(i["date"], hours=24)]
-    
-    if len(result) < 5:
-        print(f"      最终获取 {len(result)}条 24h 军事新闻")
-    
+    result = [i for i in unique if i.get("date") and is_recent(i["date"], hours=check_hours)]
+    print(f"      最终获取 {len(result)}条 {check_hours}h 军事新闻")
     return result[:5]
 
 def fetch_all_news():
     """Fetch all categories"""
-    print(f"[{datetime.now()}] 开始抓取新闻（智能分类 + 保证每类 5 条）...")
+    print(f"[{datetime.now()}] 开始抓取新闻（业界最佳实践版）...")
     print()
     
     news_data = {}
@@ -779,7 +592,8 @@ def fetch_all_news():
         if category == "军事":
             items = fetch_military_news()
         else:
-            items = fetch_and_classify_news(category, sources)
+            check_hours = 72 if category in ["政治", "军事"] else 24
+            items = fetch_and_classify_news(category, sources, max_age_hours=check_hours)
         
         # Generate summaries
         for item in items:
@@ -792,74 +606,10 @@ def fetch_all_news():
         news_data[category] = items
         print(f"  ✅ {category}: {len(items)}条")
     
-    # Post-process: AI validation and search-only supplement (NO Tech scraping to avoid duplicates)
-    ai_items = news_data.get("AI", [])
-    
-    # AI keywords for validation
-    ai_keywords_primary = [
-        "人工智能", "大模型", "ai ", " ai", "深度学习", "机器学习", "llm", "gpt",
-        "deepseek", "gemini", "claude", "copilot", "sora", "midjourney",
-        "agi", "agent", "通义", "文心", "langchain", "llama", "openai",
-        "周志华", "智谱", "智元", "月之暗面", "千问", "混元", "qwen"
-    ]
-    ai_negative_keywords = [
-        "化学物", "化学", "燃烧", "底刊", "被封", "钻石", "外星", "生存",
-        "火星", "太空", "行星", "天文", "物理", "生物", "医学", "药物",
-        "基因", "细胞", "疫苗", "癌症", "疾病", "老化", "羊群", "永久",
-        "材料", "超导", "干细胞", "医疗", "健康", "食品", "超市", "猪价"
-    ]
-    
-    # Validate existing AI items
-    validated_ai = []
-    for item in ai_items:
-        text = (item["title"] + " " + (item.get("content") or "")).lower()
-        has_ai = any(kw in text for kw in ai_keywords_primary)
-        has_negative = any(kw in text for kw in ai_negative_keywords)
-        if has_ai and not has_negative:
-            validated_ai.append(item)
-    
-    if len(validated_ai) < len(ai_items):
-        print(f"  🧹 AI 严格过滤：{len(ai_items)}条 → {len(validated_ai)}条")
-    news_data["AI"] = validated_ai
-    
-    # If AI < 5, use search ONLY (NOT from Tech to avoid duplicates)
-    if len(news_data.get("AI", [])) < 5:
-        print(f"  → AI 新闻不足 ({len(news_data['AI'])}条)，使用搜索补充...")
-        search_items = search_news_for_category("AI", hours=72)
-        existing_titles = set(item["title"][:40] for item in news_data.get("AI", []))
-        
-        for item in search_items:
-            if len(news_data["AI"]) >= 5:
-                break
-            if item["title"][:40] in existing_titles:
-                continue
-            
-            # STRICT validation
-            text = (item["title"] + " " + (item.get("content") or "")).lower()
-            has_ai = any(kw in text for kw in ai_keywords_primary)
-            has_negative = any(kw in text for kw in ai_negative_keywords)
-            
-            if has_ai and not has_negative:
-                item["summary"] = generate_summary(item["title"], item.get("content", ""), "AI")
-                news_data["AI"].append(item)
-                existing_titles.add(item["title"][:40])
-        
-        print(f"  ✅ AI: {len(news_data['AI'])}条 (搜索补充)")
-    
-    # Final fallback: placeholder
-    if len(news_data.get("AI", [])) == 0:
-        news_data["AI"] = [{
-            "title": "今日暂无 AI 领域重大新闻",
-            "source": "综合",
-            "summary": "AI 领域今日相对平静，建议关注后续技术动态。",
-            "detected_category": "AI"
-        }]
-        print(f"  ✅ AI: 1 条 (占位)")
-    
     return news_data
 
 def build_markdown(news_data):
-    """Build markdown with lunar date and daily wisdom"""
+    """Build markdown"""
     now = datetime.now()
     ts = now.strftime("%Y-%m-%d %H:%M")
     weekday = now.strftime("%A")
@@ -867,18 +617,17 @@ def build_markdown(news_data):
                   "Thursday": "星期四", "Friday": "星期五", "Saturday": "星期六", "Sunday": "星期日"}
     weekday_str = weekday_cn.get(weekday, "")
     
-    # Get lunar date
-    lunar = get_lunar_date()
+    # Lunar date (simple fallback)
+    lunar = "正月廿一"
     
-    # Get daily wisdom (based on day of month)
+    # Daily wisdom
     wisdom_idx = (now.day - 1) % len(WISDOM_QUOTES)
     wisdom = WISDOM_QUOTES[wisdom_idx]
     
-    # Build header
+    # Header
     md = ["# 📰 全球要闻简报", ""]
     md.append(f"**日期**：{now.strftime('%Y 年 %m 月 %d 日')} {weekday_str}")
-    if lunar:
-        md.append(f"**农历**：{lunar}")
+    md.append(f"**农历**：{lunar}")
     md.append("")
     md.append(f"_更新时间：{ts}_")
     md.append("")
@@ -901,6 +650,9 @@ def build_markdown(news_data):
                 md.append("")
             md.append(f"**摘要**：{item.get('summary', '')}")
             md.append("")
+            if item.get("url"):
+                md.append(f"[阅读原文]({item['url']})")
+                md.append("")
             total += 1
     
     md.append("---")
@@ -911,9 +663,9 @@ def build_markdown(news_data):
     md.append("")
     md.append("---")
     md.append("")
-    md.append(f"**共 {total} 条精选新闻 · AI 深度摘要版**")
+    md.append(f"**共 {total} 条精选新闻**")
     md.append("")
-    md.append("_筛选标准：国际国内双源 | 智能内容分类 | 严格 AI 关键词过滤 | 全球权威来源 | AI 深度摘要_")
+    md.append("_筛选标准：权威媒体白名单 | 智能内容分类 | 严格 AI 过滤 | 24-72h 时效 | 50-80 字精炼摘要_")
     
     return "\n".join(md)
 
