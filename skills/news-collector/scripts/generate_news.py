@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-News Collector v9.0
-- Thread-safe stats via threading.Lock
-- Parallel article content fetching (fixes N+1 bottleneck)
-- Category-level parallelism (all 5 categories fetched concurrently)
-- fetch_searxng uses retry + stats tracking
-- Dynamic lunar calendar date via cnlunar
+News Collector v10.0
+- RSS/Atom feed support (Google News, Al Jazeera, CNBC, TechCrunch)
+- Mixed Chinese + international sources
+- Simplified classification: trust source categorization, no cross-category leaking
+- Relaxed date filter: missing date = assume recent from trusted sources
+- SearxNG supplement for ALL categories (not just AI)
+- Thread-safe stats, parallel fetching at source and category level
+- Self-contained lunar calendar (no external deps)
 - Config-driven from config.json
 """
 
@@ -16,8 +18,10 @@ import time
 import threading
 import urllib.request
 import urllib.parse
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
+from email.utils import parsedate_to_datetime
 from html import unescape
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -50,6 +54,8 @@ FETCH_TIMEOUT = CFG["fetch_timeout"]
 ARTICLE_TIMEOUT = CFG["article_timeout"]
 RETRY_ATTEMPTS = CFG["retry_attempts"]
 RETRY_DELAY = CFG["retry_delay_seconds"]
+SEARCH_QUERIES = CFG.get("search_queries", {})
+SEARCH_SKIP_SITES = CFG.get("search_skip_sites", [])
 
 _stats = {"success": 0, "failed": 0, "retried": 0}
 _stats_lock = threading.Lock()
@@ -67,8 +73,8 @@ def _inc_stat(key):
 def _do_fetch(url, timeout):
     req = urllib.request.Request(url, headers={
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/json",
-        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/json",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
     })
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8", errors="ignore")
@@ -110,50 +116,142 @@ def fetch_searxng(query):
 def clean_html(text):
     if not text:
         return ""
+    text = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', text, flags=re.DOTALL)
     text = re.sub(r'<[^>]+>', '', text)
     text = unescape(text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
 
-def extract_date_from_html(html):
-    if not html:
+def _parse_date(date_str):
+    """Parse date from various formats: RFC 822, ISO 8601, YYYY-MM-DD."""
+    if not date_str:
         return None
-    match = re.search(r'(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})', html)
-    if match:
+    date_str = date_str.strip()
+    # RFC 822 (RSS pubDate)
+    try:
+        dt = parsedate_to_datetime(date_str)
+        return dt.replace(tzinfo=None)
+    except Exception:
+        pass
+    # ISO 8601 (Atom published)
+    try:
+        clean = re.sub(r'(\.\d+)?([+-]\d{2}:\d{2}|Z)$', '', date_str)
+        return datetime.fromisoformat(clean)
+    except Exception:
+        pass
+    # YYYY-MM-DD with optional time
+    m = re.search(r'(\d{4})-(\d{2})-(\d{2})[T\s]?(\d{2})?:?(\d{2})?', date_str)
+    if m:
         try:
-            return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)),
-                            int(match.group(4)), int(match.group(5)))
+            parts = [int(m.group(i)) for i in range(1, 4)]
+            h = int(m.group(4)) if m.group(4) else 0
+            mi = int(m.group(5)) if m.group(5) else 0
+            return datetime(parts[0], parts[1], parts[2], h, mi)
         except ValueError:
             pass
-    match = re.search(r'(\d{4})-(\d{2})-(\d{2})', html)
-    if match:
-        try:
-            return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)))
-        except ValueError:
-            pass
-    if '今天' in html or '今日' in html or 'today' in html.lower():
+    if '今天' in date_str or '今日' in date_str:
         return datetime.now()
-    if '昨天' in html or 'yesterday' in html.lower():
+    if '昨天' in date_str:
         return datetime.now() - timedelta(days=1)
     return None
 
 
 def is_recent(date, hours=24):
+    """Check if a date is within the given time window. None = assume recent."""
     if not date:
-        return False
-    return (datetime.now() - date).total_seconds() <= (hours * 3600)
+        return True
+    try:
+        if hasattr(date, 'tzinfo') and date.tzinfo:
+            date = date.replace(tzinfo=None)
+        return (datetime.now() - date).total_seconds() <= (hours * 3600)
+    except Exception:
+        return True
+
+
+# ---------------------------------------------------------------------------
+# RSS / Atom feed parser
+# ---------------------------------------------------------------------------
+
+def parse_rss_feed(xml_text, source_name=""):
+    """Parse RSS 2.0 or Atom feed into a list of news items."""
+    items = []
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return []
+
+    seen = set()
+
+    # RSS 2.0: <rss><channel><item>
+    for entry in root.findall('.//item'):
+        title = clean_html(entry.findtext('title', ''))
+        link = entry.findtext('link', '')
+        desc = clean_html(entry.findtext('description', ''))
+        pub = entry.findtext('pubDate', '')
+        date = _parse_date(pub)
+
+        if not title or len(title) < 8:
+            continue
+        key = title[:40]
+        if key in seen:
+            continue
+        seen.add(key)
+
+        # Google News RSS: description = "title - source" — not useful
+        if desc and desc.startswith(title[:20]):
+            desc = ""
+
+        items.append({
+            "title": title,
+            "url": link,
+            "source": source_name,
+            "content": desc,
+            "date": date,
+        })
+
+    if items:
+        return items
+
+    # Atom: <feed><entry>
+    for entry in root.iter():
+        if entry.tag.endswith('}entry') or entry.tag == 'entry':
+            ns = entry.tag.replace('entry', '') if '}' in entry.tag else ''
+            title_el = entry.find(f'{ns}title')
+            link_el = entry.find(f'{ns}link')
+            desc_el = entry.find(f'{ns}summary') or entry.find(f'{ns}content')
+            pub_el = entry.find(f'{ns}published') or entry.find(f'{ns}updated')
+
+            title = clean_html(title_el.text if title_el is not None and title_el.text else '')
+            link = link_el.get('href', '') if link_el is not None else ''
+            desc = clean_html(desc_el.text if desc_el is not None and desc_el.text else '')
+            pub = pub_el.text if pub_el is not None and pub_el.text else ''
+            date = _parse_date(pub)
+
+            if not title or len(title) < 8:
+                continue
+            key = title[:40]
+            if key in seen:
+                continue
+            seen.add(key)
+
+            if desc and desc.startswith(title[:20]):
+                desc = ""
+
+            items.append({
+                "title": title,
+                "url": link,
+                "source": source_name,
+                "content": desc,
+                "date": date,
+            })
+
+    return items
 
 
 # ---------------------------------------------------------------------------
 # Lunar calendar — self-contained, no external dependencies
 # ---------------------------------------------------------------------------
-# Standard lookup table: one entry per lunar year (1900-2050).
-# Encoding per entry:
-#   bits 0-3  : leap month number (0 = no leap month)
-#   bit  4    : 1 if the leap month has 30 days, 0 if 29
-#   bits 5-16 : months 1-12 (bit 16 = month 1), 1 = 30 days, 0 = 29 days
-# Base date: Gregorian 1900-01-31 == Lunar 1900/正月/初一
 
 _LUNAR_INFO = [
     0x1e4a2, 0x095c0, 0x14ae0, 0x0a9a5, 0x1a4c0, 0x1b2a0, 0x0cab4, 0x0ad40, 0x135a0, 0x0aba2,
@@ -251,7 +349,7 @@ def _compute_lunar_date(dt):
 
 
 def get_lunar_date_str():
-    """Return today's lunar date, e.g. '二月初一'. Self-contained, no pip deps needed."""
+    """Return today's lunar date. Tries cnlunar first, falls back to builtin."""
     try:
         import cnlunar
         lunar = cnlunar.Lunar(datetime.now())
@@ -259,7 +357,6 @@ def get_lunar_date_str():
         return f"{month}{lunar.lunarDayCn}"
     except Exception:
         pass
-
     try:
         return _compute_lunar_date(datetime.now())
     except Exception:
@@ -267,23 +364,8 @@ def get_lunar_date_str():
 
 
 # ---------------------------------------------------------------------------
-# Classification
+# AI-specific validation
 # ---------------------------------------------------------------------------
-
-def classify_content(title, content=""):
-    text = (title + " " + content).lower()
-
-    if any(kw.lower() in text for kw in CATEGORY_KEYWORDS["军事"]):
-        return "军事"
-
-    scores = {}
-    for category in ["政治", "经济", "AI", "科技"]:
-        keywords = CATEGORY_KEYWORDS[category]
-        scores[category] = sum(1 for kw in keywords if kw.lower() in text)
-
-    best = max(scores, key=scores.get)
-    return best if scores[best] > 0 else None
-
 
 def validate_ai_news(title, content=""):
     text = (title + " " + (content or "")).lower()
@@ -295,7 +377,7 @@ def validate_ai_news(title, content=""):
 
 
 # ---------------------------------------------------------------------------
-# News extraction from HTML pages
+# HTML news extraction
 # ---------------------------------------------------------------------------
 
 def extract_news_from_html(html, source_url=""):
@@ -305,21 +387,30 @@ def extract_news_from_html(html, source_url=""):
     items = []
     base_url = "/".join(source_url.split("/")[:3])
     seen = set()
-    page_date = extract_date_from_html(html)
+    page_date = _parse_date(html[:5000])
     current_month = datetime.now().month
 
-    matches = re.findall(r'<a[^>]+href="([^"]+)"[^>]*>([^<]{20,120})</a>', html, re.IGNORECASE)
+    matches = re.findall(r'<a[^>]+href="([^"]+)"[^>]*>([^<]{10,120})</a>', html, re.IGNORECASE)
+    # Also try links with nested tags (e.g. <a><span>title</span></a>)
+    matches += re.findall(
+        r'<a[^>]+href="([^"]+)"[^>]*>\s*(?:<[^>]+>)*([^<]{10,120})(?:</[^>]+>)*\s*</a>',
+        html, re.IGNORECASE
+    )
 
     for href, raw_title in matches:
         title = clean_html(raw_title).strip()
 
-        if len(title) < 15 or len(title) > 80:
+        if len(title) < 12 or len(title) > 100:
             continue
-        if sum(1 for c in title if '\u4e00' <= c <= '\u9fff') < 5:
+
+        cn_chars = sum(1 for c in title if '\u4e00' <= c <= '\u9fff')
+        en_words = len(re.findall(r'[a-zA-Z]{3,}', title))
+        if cn_chars < 4 and en_words < 3:
             continue
 
         skip_words = ["首页", "更多", "广告", "登录", "下载", "专题", "直播",
-                      "导航", "列表", "关于我们", "联系我们", "许可证", "经营许可证", "京 B2"]
+                      "导航", "列表", "关于我们", "联系我们", "许可证", "京 B2",
+                      "Cookie", "Subscribe", "Sign in", "Log in"]
         if any(w in title for w in skip_words):
             continue
 
@@ -364,19 +455,32 @@ def fetch_article_content(url, timeout=None):
         if not html:
             return "", None
 
+        date = _parse_date(html[:3000])
+
+        # og:description (most reliable)
+        match = re.search(
+            r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']',
+            html, re.IGNORECASE)
+        if match:
+            desc = clean_html(match.group(1))
+            if len(desc) > 30:
+                return desc, date
+
+        # meta description
         match = re.search(
             r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)["\']',
             html, re.IGNORECASE)
         if match:
-            desc = unescape(match.group(1))
+            desc = clean_html(match.group(1))
             if len(desc) > 30:
-                return desc, extract_date_from_html(html)
+                return desc, date
 
-        paragraphs = re.findall(r'<p[^>]*>([^<]{50,500})</p>', html)
+        # First substantial paragraph
+        paragraphs = re.findall(r'<p[^>]*>([^<]{40,500})</p>', html)
         if paragraphs:
-            return clean_html(paragraphs[0]), extract_date_from_html(html)
+            return clean_html(paragraphs[0]), date
 
-        return "", extract_date_from_html(html)
+        return "", date
     except Exception:
         return "", None
 
@@ -385,32 +489,29 @@ def fetch_article_content(url, timeout=None):
 # Summary generation
 # ---------------------------------------------------------------------------
 
-def generate_summary(title, content, category):
-    """50-80 chars optimal, max 100. Subject-Verb-Object, data-first."""
+def generate_summary(title, content):
+    """Generate 50-80 char summary. Data-first, subject-verb-object."""
     if not content:
         clean = re.sub(r'[（(].*[)）]$', '', title).strip()
         return clean[:80]
 
     content = clean_html(content)
 
-    low_quality = ["首页>", "导航", "专题", "广告", "推荐", "登录", "注册", "下载 APP", "扫码"]
-    if any(p in content for p in low_quality):
+    low_quality = ["首页>", "导航", "专题", "广告", "推荐", "登录", "注册", "下载 APP", "扫码",
+                   "Cookie", "Subscribe", "newsletter"]
+    if any(p.lower() in content.lower() for p in low_quality):
         return re.sub(r'[（(].*[)）]$', '', title).strip()[:80]
 
-    if re.search(r'我们是 | 旗下 | 新媒体 | 专注于 | 致力于', content):
+    if re.search(r'我们是|旗下|新媒体|专注于|致力于', content):
         return re.sub(r'[（(].*[)）]$', '', title).strip()[:80]
 
     sentences = re.split(r'[。！？.!?]', content)
     meaningful = []
     for s in sentences:
         s = s.strip()
-        if len(s) < 20:
+        if len(s) < 15:
             continue
         if any(w in s for w in ["广告", "推荐", "首页", "导航", "扫码", "关注", "更多"]):
-            continue
-        if re.match(r'^[^\u4e00-\u9fa5]*([\u4e00-\u9fa5]{2,4}[,，][^\u4e00-\u9fa5]*)*[\u4e00-\u9fa5]{2,4}[,，]', s):
-            continue
-        if s.count(',') + s.count('，') > len(s) / 2:
             continue
         meaningful.append(s)
 
@@ -423,7 +524,7 @@ def generate_summary(title, content, category):
 
     data_point = ""
     for s in meaningful[1:4]:
-        if re.search(r'\d+[.%亿元]', s):
+        if re.search(r'\d+[.%亿元万]', s):
             data_point = re.sub(r'[（(][^)）]*[)）]', '', s).strip()
             break
 
@@ -435,26 +536,25 @@ def generate_summary(title, content, category):
     if len(summary) > 100:
         summary = summary[:97] + "..."
 
-    summary = re.sub(r'^[^\u4e00-\u9fa5]+[:：]', '', summary).strip()
+    summary = re.sub(r'^[^\u4e00-\u9fa5a-zA-Z]+[:：]', '', summary).strip()
     summary = re.sub(r'^[,，:：\s]+', '', summary)
-    summary = re.sub(r'[,，][^\u4e00-\u9fa5]*([\u4e00-\u9fa5]{2,4}[,，]){2,}.*$', '', summary)
 
     return summary[:100]
 
 
 # ---------------------------------------------------------------------------
-# Unified category fetching with parallel article content
+# Source fetching: unified HTML + RSS
 # ---------------------------------------------------------------------------
 
 def _enrich_item(item, category):
-    """Fetch article content for a single item. Designed to run in thread pool."""
+    """Fetch article content for a single HTML-sourced item."""
     if category == "军事":
         if not any(kw in item["title"] for kw in CATEGORY_KEYWORDS["军事"]):
             return None
 
     if item["url"]:
         content, article_date = fetch_article_content(item["url"])
-        if content and re.search(r'我们是 | 旗下 | 新媒体 | 专注于', content):
+        if content and re.search(r'我们是|旗下|新媒体|专注于', content):
             return None
         item["content"] = content
         if article_date:
@@ -463,8 +563,8 @@ def _enrich_item(item, category):
     return item
 
 
-def _fetch_source(source_name, url, category):
-    """Fetch a single source, then parallel-enrich article content."""
+def _fetch_html_source(source_name, url, category):
+    """Fetch and enrich items from an HTML news page."""
     html = fetch_with_retry(url)
     if not html:
         return []
@@ -473,10 +573,8 @@ def _fetch_source(source_name, url, category):
     for item in items:
         item["source"] = source_name
 
-    # Limit candidates before fetching article details
     candidates = items[:MAX_ITEMS * 2]
 
-    # Parallel fetch article content for candidates
     result = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         futures = {pool.submit(_enrich_item, item, category): item for item in candidates}
@@ -491,86 +589,31 @@ def _fetch_source(source_name, url, category):
     return result
 
 
-def _fetch_category(category, sources):
-    """Fetch and classify news for a single category. Designed for top-level parallelism."""
-    print(f"  抓取 {category} 新闻...")
-    check_hours = TIME_WINDOWS.get(category, 24)
-
-    all_items = []
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        futures = {
-            pool.submit(_fetch_source, name, url, category): name
-            for name, url in sources
-        }
-        for future in as_completed(futures):
-            name = futures[future]
-            try:
-                items = future.result()
-                print(f"    → {name}: {len(items)} 条")
-                all_items.extend(items)
-            except Exception as e:
-                print(f"    → {name}: 抓取失败 ({e})")
-
-    # Classify and filter
-    classified = {cat: [] for cat in CATEGORY_KEYWORDS}
-    for item in all_items:
-        detected = classify_content(item["title"], item.get("content", ""))
-        if detected:
-            item["detected_category"] = detected
-            classified[detected].append(item)
-        else:
-            item["detected_category"] = category
-            classified[category].append(item)
-
-    result = [i for i in classified[category]
-              if i.get("date") and is_recent(i["date"], hours=check_hours)]
-
-    # AI: strict validation + search supplement
-    if category == "AI":
-        validated = [i for i in result if validate_ai_news(i["title"], i.get("content", ""))]
-        if len(validated) < len(result):
-            print(f"      AI 严格过滤：{len(result)} 条 → {len(validated)} 条")
-        result = validated
-
-        if len(result) < 3:
-            print(f"      AI 不足 ({len(result)} 条)，使用搜索补充...")
-            search_items = _search_ai_news(hours=168)
-            existing_keys = {i["title"][:30] for i in result}
-            for item in search_items:
-                if len(result) >= MAX_ITEMS:
-                    break
-                if validate_ai_news(item["title"], item.get("content", "")):
-                    if item["title"][:30] not in existing_keys:
-                        result.append(item)
-                        existing_keys.add(item["title"][:30])
-            if result:
-                print(f"      搜索补充后：{len(result)} 条")
-
-    # Deduplicate
-    seen = set()
-    unique = []
-    for item in result:
-        key = item["title"][:30]
-        if key not in seen:
-            seen.add(key)
-            unique.append(item)
-
-    # Generate summaries
-    for item in unique:
-        item["summary"] = generate_summary(
-            item["title"],
-            item.get("content", ""),
-            item.get("detected_category", category),
-        )
-
-    count = len(unique[:MAX_ITEMS])
-    print(f"      最终获取 {count} 条 {check_hours}h 新闻")
-    return category, unique[:MAX_ITEMS]
+def _fetch_rss_source(source_name, url):
+    """Fetch and parse an RSS/Atom feed."""
+    xml_text = fetch_with_retry(url, timeout=FETCH_TIMEOUT)
+    if not xml_text:
+        return []
+    return parse_rss_feed(xml_text, source_name)
 
 
-def _search_ai_news(hours=48):
-    queries = CFG.get("ai_search_queries", [])
-    skip_sites = CFG.get("ai_search_skip_sites", [])
+def _fetch_source(source_name, url, category, source_type="html"):
+    if source_type == "rss":
+        return _fetch_rss_source(source_name, url)
+    else:
+        return _fetch_html_source(source_name, url, category)
+
+
+# ---------------------------------------------------------------------------
+# SearxNG supplement (all categories)
+# ---------------------------------------------------------------------------
+
+def _search_news(category, hours=168):
+    """Search SearxNG for supplementary news in any category."""
+    queries = SEARCH_QUERIES.get(category, [])
+    if not queries:
+        return []
+
     items = []
     seen = set()
 
@@ -586,11 +629,14 @@ def _search_ai_news(hours=48):
             url = r.get("url", "")
             content = r.get("content", "")
 
-            if len(title) < 15 or len(title) > 100:
+            if len(title) < 10 or len(title) > 120:
                 continue
-            if any(s in url.lower() for s in skip_sites):
+            if any(s in url.lower() for s in SEARCH_SKIP_SITES):
                 continue
-            if sum(1 for c in title if '\u4e00' <= c <= '\u9fff') < 5:
+
+            cn_chars = sum(1 for c in title if '\u4e00' <= c <= '\u9fff')
+            en_words = len(re.findall(r'[a-zA-Z]{3,}', title))
+            if cn_chars < 3 and en_words < 3:
                 continue
 
             skip_patterns = ["教程", "指南", "免费使用", "下载", "APP", "推广", "怎么使用"]
@@ -602,19 +648,98 @@ def _search_ai_news(hours=48):
                 continue
             seen.add(title_key)
 
-            pub_date = extract_date_from_html(content) if content else None
+            pub_date = _parse_date(content) if content else None
 
             items.append({
                 "title": title,
                 "url": url,
                 "source": "搜索",
-                "content": content,
+                "content": content or "",
                 "date": pub_date or datetime.now(),
-                "detected_category": "AI",
             })
 
-    print(f"      搜索获取 {len(items)} 条 AI 新闻")
+    print(f"      搜索补充 {len(items)} 条 {category} 新闻")
     return items
+
+
+# ---------------------------------------------------------------------------
+# Category-level fetch + filter
+# ---------------------------------------------------------------------------
+
+def _fetch_category(category, sources):
+    """Fetch, filter, and rank news for one category."""
+    print(f"  抓取 {category} 新闻...")
+    check_hours = TIME_WINDOWS.get(category, 48)
+
+    # Parallel fetch from all sources
+    all_items = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        futures = {}
+        for src in sources:
+            name, url = src[0], src[1]
+            stype = src[2] if len(src) > 2 else "html"
+            futures[pool.submit(_fetch_source, name, url, category, stype)] = name
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                items = future.result()
+                print(f"    → {name}: {len(items)} 条")
+                all_items.extend(items)
+            except Exception as e:
+                print(f"    → {name}: 抓取失败 ({e})")
+
+    # Date filter: keep items with no date (assume recent) or recent date
+    result = [i for i in all_items if is_recent(i.get("date"), hours=check_hours)]
+
+    # Category-specific validation
+    if category == "AI":
+        validated = [i for i in result if validate_ai_news(i["title"], i.get("content", ""))]
+        if len(validated) < len(result):
+            print(f"      AI 过滤：{len(result)} → {len(validated)} 条")
+        result = validated
+    elif category == "军事":
+        validated = [i for i in result
+                     if any(kw.lower() in (i["title"] + " " + i.get("content", "")).lower()
+                            for kw in CATEGORY_KEYWORDS["军事"])]
+        if len(validated) < len(result):
+            print(f"      军事过滤：{len(result)} → {len(validated)} 条")
+        result = validated
+
+    # SearxNG supplement if too few items
+    if len(result) < 3:
+        print(f"      {category} 不足 ({len(result)} 条)，搜索补充...")
+        search_items = _search_news(category, hours=168)
+        existing_keys = {i["title"][:30] for i in result}
+        for item in search_items:
+            if len(result) >= MAX_ITEMS:
+                break
+            if category == "AI" and not validate_ai_news(item["title"], item.get("content", "")):
+                continue
+            if item["title"][:30] not in existing_keys:
+                result.append(item)
+                existing_keys.add(item["title"][:30])
+
+    # Deduplicate by title prefix AND URL
+    seen_titles = set()
+    seen_urls = set()
+    unique = []
+    for item in result:
+        title_key = item["title"][:30]
+        url_key = item.get("url", "").split("?")[0]
+        if title_key in seen_titles or (url_key and url_key in seen_urls):
+            continue
+        seen_titles.add(title_key)
+        if url_key:
+            seen_urls.add(url_key)
+        unique.append(item)
+
+    # Generate summaries
+    for item in unique:
+        item["summary"] = generate_summary(item["title"], item.get("content", ""))
+
+    count = len(unique[:MAX_ITEMS])
+    print(f"      最终 {count} 条 {category} ({check_hours}h)")
+    return category, unique[:MAX_ITEMS]
 
 
 # ---------------------------------------------------------------------------
@@ -626,7 +751,6 @@ def fetch_all_news():
     print()
 
     news_data = {}
-    # All categories in parallel
     with ThreadPoolExecutor(max_workers=len(NEWS_SOURCES)) as pool:
         futures = {
             pool.submit(_fetch_category, cat, sources): cat
@@ -642,7 +766,6 @@ def fetch_all_news():
                 print(f"  ❌ {cat_name}: 失败 ({e})")
                 news_data[cat_name] = []
 
-    # Preserve original category order from config
     ordered = {}
     for cat in NEWS_SOURCES:
         ordered[cat] = news_data.get(cat, [])
@@ -679,14 +802,21 @@ def build_markdown(news_data):
         md.append(f"## {icon} {category}")
         md.append("")
 
+        if not items:
+            md.append("_暂无最新新闻_")
+            md.append("")
+            continue
+
         for i, item in enumerate(items, 1):
             md.append(f"### {i}. {item.get('title', '')}")
             md.append("")
             if item.get("source"):
                 md.append(f"**来源**：{item['source']}")
                 md.append("")
-            md.append(f"**摘要**：{item.get('summary', '')}")
-            md.append("")
+            summary = item.get("summary", "")
+            if summary and summary != item.get("title", ""):
+                md.append(f"**摘要**：{summary}")
+                md.append("")
             if item.get("url"):
                 md.append(f"[阅读原文]({item['url']})")
                 md.append("")
@@ -703,7 +833,7 @@ def build_markdown(news_data):
     md.append(f"**共 {total} 条精选新闻**")
     md.append("")
     md.append(
-        f"_筛选标准：权威媒体白名单 | 智能内容分类 | 严格 AI 过滤 | 24-72h 时效 | 50-80 字精炼摘要_"
+        f"_来源：中外权威媒体 + RSS 订阅 + 搜索引擎 | {check_hours_desc()} | 精炼摘要_"
     )
     md.append("")
     with _stats_lock:
@@ -712,6 +842,13 @@ def build_markdown(news_data):
         )
 
     return "\n".join(md)
+
+
+def check_hours_desc():
+    windows = set(TIME_WINDOWS.values())
+    if len(windows) == 1:
+        return f"{windows.pop()}h 时效"
+    return f"{min(windows)}-{max(windows)}h 时效"
 
 
 def main():

@@ -1,42 +1,44 @@
 {
   "news_sources": {
     "政治": [
-      ["澎湃新闻", "https://www.thepaper.cn/list_21587"],
-      ["观察者网", "https://www.guancha.cn/world/"],
-      ["联合早报", "https://www.zaobao.com.sg/news/realtime/china"],
-      ["央视新闻", "https://news.cctv.com/world/"]
+      ["观察者网", "https://www.guancha.cn/world/", "html"],
+      ["Google国际", "https://news.google.com/rss/search?q=%E5%9B%BD%E9%99%85+%E5%A4%96%E4%BA%A4+%E6%97%B6%E4%BA%8B+when%3A3d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans", "rss"],
+      ["央视新闻", "https://news.cctv.com/world/", "html"]
     ],
     "经济": [
-      ["财新网", "https://www.caixin.com/"],
-      ["彭博社中文", "https://www.bloombergchina.com/"],
-      ["金融时报中文", "https://www.ftchinese.com/"],
-      ["一财网", "https://www.yicai.com/"],
-      ["21 世纪经济报道", "https://m.21jingji.com/"]
+      ["财新网", "https://www.caixin.com/", "html"],
+      ["Google财经", "https://news.google.com/rss/search?q=%E5%85%A8%E7%90%83+%E7%BB%8F%E6%B5%8E+%E9%87%91%E8%9E%8D+%E5%B8%82%E5%9C%BA+when%3A3d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans", "rss"],
+      ["CNBC", "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100727362", "rss"]
     ],
     "科技": [
-      ["36 氪", "https://36kr.com/"],
-      ["虎嗅", "https://www.huxiu.com/"],
-      ["钛媒体", "https://www.tmtpost.com/"]
+      ["钛媒体", "https://www.tmtpost.com/", "html"],
+      ["TechCrunch", "https://techcrunch.com/feed/", "rss"],
+      ["Google科技", "https://news.google.com/rss/search?q=%E7%A7%91%E6%8A%80+%E4%BA%92%E8%81%94%E7%BD%91+%E5%88%9B%E6%96%B0+when%3A3d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans", "rss"]
     ],
     "AI": [
-      ["量子位", "https://www.qbitai.com/"],
-      ["机器之心", "https://www.jiqizhixin.com/"],
-      ["新智元", "https://www.aitecher.com/"],
-      ["AI 前线", "https://www.infoq.cn/topic/AI"]
+      ["量子位", "https://www.qbitai.com/", "html"],
+      ["机器之心", "https://www.jiqizhixin.com/", "html"],
+      ["Google AI", "https://news.google.com/rss/search?q=%E4%BA%BA%E5%B7%A5%E6%99%BA%E8%83%BD+%E5%A4%A7%E6%A8%A1%E5%9E%8B+GPT+DeepSeek+OpenAI+when%3A3d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans", "rss"]
     ],
     "军事": [
-      ["网易军事", "https://war.163.com/"],
-      ["新浪军事", "https://news.sina.com.cn/m/"],
-      ["腾讯军事", "https://news.qq.com/mil/"],
-      ["中国军网", "https://www.81.cn/"]
+      ["网易军事", "https://war.163.com/", "html"],
+      ["Google军事", "https://news.google.com/rss/search?q=%E5%86%9B%E4%BA%8B+%E5%9B%BD%E9%98%B2+%E5%86%B2%E7%AA%81+when%3A3d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans", "rss"],
+      ["Al Jazeera", "https://www.aljazeera.com/xml/rss/all.xml", "rss"]
     ]
   },
   "category_keywords": {
-    "军事": ["军事", "国防", "军队", "解放军", "演习", "战机", "舰艇", "导弹", "武警", "海军", "空军", "陆军", "火箭军", "美军", "以军", "伊朗", "以色列", "五角大楼", "航母", "轰炸", "空袭", "俘获", "士兵"],
-    "政治": ["国际", "外交", "选举", "政府", "总统", "总理", "会谈", "访问", "政策", "议会", "国会", "首相", "制裁", "抗议", "王毅", "中美", "议员", "委内瑞拉"],
-    "经济": ["经济", "市场", "股市", "金融", "投资", "企业", "财报", "CPI", "PPI", "通胀", "利率", "央行", "贸易", "油价", "基金", "理财", "销售额", "营收"],
-    "AI": ["AI", "人工智能", "大模型", "千问", "商汤", "智谱", "算力", "视觉", "认知", "NVIDIA", "具身", "多模态", "LLM", "GPT", "Claude", "Gemini", "DeepSeek", "Agent", "智能体"],
-    "科技": ["科技", "互联网", "数码", "通信", "芯片", "软件", "机器人", "基站", "电动车", "手机", "发布", "上市"]
+    "军事": ["军事", "国防", "军队", "解放军", "演习", "战机", "舰艇", "导弹", "武警", "海军", "空军", "陆军", "火箭军", "美军", "以军", "伊朗", "以色列", "五角大楼", "航母", "轰炸", "空袭", "俘获", "士兵", "war", "military", "strike", "attack", "troops"],
+    "政治": ["国际", "外交", "选举", "政府", "总统", "总理", "会谈", "访问", "政策", "议会", "国会", "首相", "制裁", "抗议", "王毅", "中美", "议员", "summit", "diplomacy", "sanctions"],
+    "经济": ["经济", "市场", "股市", "金融", "投资", "企业", "财报", "CPI", "PPI", "通胀", "利率", "央行", "贸易", "油价", "基金", "理财", "销售额", "营收", "economy", "market", "trade"],
+    "AI": ["AI", "人工智能", "大模型", "千问", "商汤", "智谱", "算力", "视觉", "认知", "NVIDIA", "具身", "多模态", "LLM", "GPT", "Claude", "Gemini", "DeepSeek", "Agent", "智能体", "OpenAI"],
+    "科技": ["科技", "互联网", "数码", "通信", "芯片", "软件", "机器人", "基站", "电动车", "手机", "发布", "上市", "startup", "chip", "software"]
+  },
+  "search_queries": {
+    "政治": ["国际政治 外交 时事", "world politics diplomacy"],
+    "经济": ["全球经济 金融 市场", "global economy markets finance"],
+    "科技": ["科技 互联网 创新 发布", "technology innovation"],
+    "AI": ["人工智能 大模型", "AI 技术 突破", "GPT Claude Gemini DeepSeek", "AI artificial intelligence news", "LLM 大语言模型", "AI Agent 智能体 应用"],
+    "军事": ["军事 国防 冲突", "military defense conflict"]
   },
   "ai_must_have": [
     "人工智能", "大模型", "AI ", " AI", "深度学习", "机器学习", "LLM", "GPT",
@@ -49,17 +51,13 @@
     "教程", "指南", "如何使用", "怎么使用", "免费使用", "下载", "APP", "推广",
     "化学物", "化学", "燃烧", "外星", "火星", "太空", "行星", "天文",
     "物理", "生物", "医学", "药物", "基因", "细胞", "疫苗", "癌症",
-    "疾病", "医疗", "健康", "食品", "超市"
+    "疾病", "医疗", "健康", "食品", "超市",
+    "AI平板", "AI好车", "AI手机", "AI电视", "AI音箱", "AI冰箱",
+    "招聘", "实习生", "校招", "春招", "秋招", "求职",
+    "龙虾", "于谦", "娱乐", "八卦", "综艺", "选秀",
+    "发布会", "新品发布", "科技新品发布"
   ],
-  "ai_search_queries": [
-    "人工智能 大模型",
-    "AI 技术 突破",
-    "GPT Claude Gemini DeepSeek",
-    "AI artificial intelligence news",
-    "LLM 大语言模型",
-    "AI Agent 智能体 应用"
-  ],
-  "ai_search_skip_sites": [
+  "search_skip_sites": [
     "zhihu.com", "baidu.com", "weibo.com", "toutiao.com", "csdn.net", "jianshu.com"
   ],
   "wisdom_quotes": [
@@ -88,15 +86,15 @@
   },
   "time_windows": {
     "政治": 72,
-    "经济": 24,
+    "经济": 48,
     "军事": 72,
-    "科技": 24,
-    "AI": 24
+    "科技": 48,
+    "AI": 48
   },
   "max_items_per_category": 5,
   "max_workers": 4,
-  "fetch_timeout": 8,
-  "article_timeout": 4,
+  "fetch_timeout": 10,
+  "article_timeout": 5,
   "retry_attempts": 2,
   "retry_delay_seconds": 1
 }
