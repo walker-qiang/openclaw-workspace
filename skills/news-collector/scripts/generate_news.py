@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-News Collector v10.0
+News Collector v11.0
+- Importance-based ranking: major powers, crises, breakthroughs > minor events
+- Auto-translation: English news translated to Chinese (not filtered out)
 - RSS/Atom feed support (Google News, Al Jazeera, CNBC, TechCrunch)
-- Mixed Chinese + international sources
-- Simplified classification: trust source categorization, no cross-category leaking
-- Relaxed date filter: missing date = assume recent from trusted sources
-- SearxNG supplement for ALL categories (not just AI)
+- Mixed Chinese + international sources for true global coverage
+- SearxNG supplement for ALL categories
 - Thread-safe stats, parallel fetching at source and category level
 - Self-contained lunar calendar (no external deps)
 - Config-driven from config.json
@@ -56,6 +56,7 @@ RETRY_ATTEMPTS = CFG["retry_attempts"]
 RETRY_DELAY = CFG["retry_delay_seconds"]
 SEARCH_QUERIES = CFG.get("search_queries", {})
 SEARCH_SKIP_SITES = CFG.get("search_skip_sites", [])
+IMPORTANCE_KEYWORDS = CFG.get("importance_keywords", {})
 
 _stats = {"success": 0, "failed": 0, "retried": 0}
 _stats_lock = threading.Lock()
@@ -107,6 +108,69 @@ def fetch_searxng(query):
         return data.get("results", [])
     except (json.JSONDecodeError, ValueError):
         return []
+
+
+# ---------------------------------------------------------------------------
+# Translation: English → Chinese via Google Translate (no API key)
+# ---------------------------------------------------------------------------
+
+def _needs_translation(text):
+    """Return True if text is predominantly non-Chinese and needs translation."""
+    if not text:
+        return False
+    cn_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+    alpha_chars = sum(1 for c in text if c.isalpha())
+    if alpha_chars == 0:
+        return False
+    return cn_chars / alpha_chars < 0.3
+
+
+def _translate_to_chinese(text):
+    """Translate non-Chinese text to Chinese. Returns original on failure."""
+    if not text or not _needs_translation(text):
+        return text
+    try:
+        encoded = urllib.parse.quote(text[:500])
+        url = (
+            "https://translate.googleapis.com/translate_a/single"
+            f"?client=gtx&sl=auto&tl=zh-CN&dt=t&q={encoded}"
+        )
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode())
+            return "".join(part[0] for part in data[0] if part[0])
+    except Exception:
+        return text
+
+
+# ---------------------------------------------------------------------------
+# Importance scoring: rank news by geopolitical/economic significance
+# ---------------------------------------------------------------------------
+
+def _importance_score(item):
+    """Score by significance. Higher = more important. Major powers, crises,
+    breakthroughs, and tech giants all contribute to the score."""
+    text = (item.get("title", "") + " " + item.get("content", "")).lower()
+    score = 0
+    for kw in IMPORTANCE_KEYWORDS.get("major_powers", []):
+        if kw.lower() in text:
+            score += 15
+            break
+    for kw in IMPORTANCE_KEYWORDS.get("crises", []):
+        if kw.lower() in text:
+            score += 10
+            break
+    for kw in IMPORTANCE_KEYWORDS.get("breakthroughs", []):
+        if kw.lower() in text:
+            score += 5
+            break
+    for kw in IMPORTANCE_KEYWORDS.get("tech_giants", []):
+        if kw.lower() in text:
+            score += 8
+            break
+    if item.get("content"):
+        score += 2
+    return score
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +237,23 @@ def is_recent(date, hours=24):
 # RSS / Atom feed parser
 # ---------------------------------------------------------------------------
 
+def _clean_rss_title(title, source_name=""):
+    """Strip trailing ' - 新浪网' / ' - 36kr.com' source suffix from RSS titles."""
+    if not source_name.startswith("Google"):
+        return title
+    # "标题内容 - 新浪网" or "标题 - 36kr.com" → "标题内容"
+    m = re.search(r'\s*[-–—|]\s*[\w\u4e00-\u9fff.·]+(?:\s*[\w\u4e00-\u9fff.·]+)*$', title)
+    if m and len(title[:m.start()].strip()) >= 6:
+        return title[:m.start()].strip()
+    return title
+
+
+def _is_chinese_content(title):
+    """Check if title has enough Chinese characters for a Chinese news brief."""
+    cn_chars = sum(1 for c in title if '\u4e00' <= c <= '\u9fff')
+    return cn_chars >= 5
+
+
 def parse_rss_feed(xml_text, source_name=""):
     """Parse RSS 2.0 or Atom feed into a list of news items."""
     items = []
@@ -183,23 +264,21 @@ def parse_rss_feed(xml_text, source_name=""):
 
     seen = set()
 
-    # RSS 2.0: <rss><channel><item>
-    for entry in root.findall('.//item'):
-        title = clean_html(entry.findtext('title', ''))
-        link = entry.findtext('link', '')
-        desc = clean_html(entry.findtext('description', ''))
-        pub = entry.findtext('pubDate', '')
+    def _process_entry(title, link, desc, pub):
         date = _parse_date(pub)
 
         if not title or len(title) < 8:
-            continue
+            return
+
+        title = _clean_rss_title(title, source_name)
+
         key = title[:40]
         if key in seen:
-            continue
+            return
         seen.add(key)
 
-        # Google News RSS: description = "title - source" — not useful
-        if desc and desc.startswith(title[:20]):
+        # Google News RSS: description = "title source" — not useful
+        if desc and desc.startswith(title[:15]):
             desc = ""
 
         items.append({
@@ -209,6 +288,15 @@ def parse_rss_feed(xml_text, source_name=""):
             "content": desc,
             "date": date,
         })
+
+    # RSS 2.0: <rss><channel><item>
+    for entry in root.findall('.//item'):
+        _process_entry(
+            clean_html(entry.findtext('title', '')),
+            entry.findtext('link', ''),
+            clean_html(entry.findtext('description', '')),
+            entry.findtext('pubDate', ''),
+        )
 
     if items:
         return items
@@ -222,29 +310,12 @@ def parse_rss_feed(xml_text, source_name=""):
             desc_el = entry.find(f'{ns}summary') or entry.find(f'{ns}content')
             pub_el = entry.find(f'{ns}published') or entry.find(f'{ns}updated')
 
-            title = clean_html(title_el.text if title_el is not None and title_el.text else '')
-            link = link_el.get('href', '') if link_el is not None else ''
-            desc = clean_html(desc_el.text if desc_el is not None and desc_el.text else '')
-            pub = pub_el.text if pub_el is not None and pub_el.text else ''
-            date = _parse_date(pub)
-
-            if not title or len(title) < 8:
-                continue
-            key = title[:40]
-            if key in seen:
-                continue
-            seen.add(key)
-
-            if desc and desc.startswith(title[:20]):
-                desc = ""
-
-            items.append({
-                "title": title,
-                "url": link,
-                "source": source_name,
-                "content": desc,
-                "date": date,
-            })
+            _process_entry(
+                clean_html(title_el.text if title_el is not None and title_el.text else ''),
+                link_el.get('href', '') if link_el is not None else '',
+                clean_html(desc_el.text if desc_el is not None and desc_el.text else ''),
+                pub_el.text if pub_el is not None and pub_el.text else '',
+            )
 
     return items
 
@@ -410,7 +481,8 @@ def extract_news_from_html(html, source_url=""):
 
         skip_words = ["首页", "更多", "广告", "登录", "下载", "专题", "直播",
                       "导航", "列表", "关于我们", "联系我们", "许可证", "京 B2",
-                      "Cookie", "Subscribe", "Sign in", "Log in"]
+                      "Cookie", "Subscribe", "Sign in", "Log in",
+                      "投资机构库", "创投家", "CLUB", "排行榜", "课程", "活动报名"]
         if any(w in title for w in skip_words):
             continue
 
@@ -457,13 +529,16 @@ def fetch_article_content(url, timeout=None):
 
         date = _parse_date(html[:3000])
 
+        boilerplate = ["Google 新闻", "Google News", "为您汇集来自世界各地",
+                       "百度首页", "网易首页", "新浪首页"]
+
         # og:description (most reliable)
         match = re.search(
             r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']',
             html, re.IGNORECASE)
         if match:
             desc = clean_html(match.group(1))
-            if len(desc) > 30:
+            if len(desc) > 30 and not any(bp in desc for bp in boilerplate):
                 return desc, date
 
         # meta description
@@ -472,13 +547,15 @@ def fetch_article_content(url, timeout=None):
             html, re.IGNORECASE)
         if match:
             desc = clean_html(match.group(1))
-            if len(desc) > 30:
+            if len(desc) > 30 and not any(bp in desc for bp in boilerplate):
                 return desc, date
 
         # First substantial paragraph
         paragraphs = re.findall(r'<p[^>]*>([^<]{40,500})</p>', html)
-        if paragraphs:
-            return clean_html(paragraphs[0]), date
+        for p in paragraphs[:3]:
+            text = clean_html(p)
+            if len(text) > 30 and not any(bp in text for bp in boilerplate):
+                return text, date
 
         return "", date
     except Exception:
@@ -502,7 +579,7 @@ def generate_summary(title, content):
     if any(p.lower() in content.lower() for p in low_quality):
         return re.sub(r'[（(].*[)）]$', '', title).strip()[:80]
 
-    if re.search(r'我们是|旗下|新媒体|专注于|致力于', content):
+    if re.search(r'我们是|旗下|新媒体|专注于|致力于|版权所有|©|京ICP|备案号', content):
         return re.sub(r'[（(].*[)）]$', '', title).strip()[:80]
 
     sentences = re.split(r'[。！？.!?]', content)
@@ -733,6 +810,64 @@ def _fetch_category(category, sources):
             seen_urls.add(url_key)
         unique.append(item)
 
+    # Rank by importance (geopolitical/economic significance), not content availability
+    unique.sort(key=lambda x: _importance_score(x), reverse=True)
+
+    # Enrich top candidates that lack content (skip Google News redirects)
+    candidates = unique[:MAX_ITEMS + 3]
+    to_enrich = [i for i in candidates
+                 if not i.get("content")
+                 and i.get("url")
+                 and "news.google.com" not in i.get("url", "")]
+    if to_enrich:
+        print(f"      补充 {len(to_enrich)} 条文章摘要...")
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            def _fetch_content(item):
+                content, date = fetch_article_content(item["url"])
+                if content:
+                    item["content"] = content
+                if date and not item.get("date"):
+                    item["date"] = date
+                return item
+            futures = [pool.submit(_fetch_content, i) for i in to_enrich]
+            for f in as_completed(futures):
+                try:
+                    f.result()
+                except Exception:
+                    pass
+
+    # Translate ALL non-Chinese titles and content instead of filtering them out
+    to_translate = [i for i in unique if _needs_translation(i.get("title", ""))]
+    if to_translate:
+        print(f"      翻译 {len(to_translate)} 条非中文新闻...")
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            def _translate_item(item):
+                item["title"] = _translate_to_chinese(item["title"])
+                if item.get("content"):
+                    item["content"] = _translate_to_chinese(item["content"])
+                return item
+            futures = [pool.submit(_translate_item, i) for i in to_translate]
+            for f in as_completed(futures):
+                try:
+                    f.result()
+                except Exception:
+                    pass
+
+    # Re-rank after enrichment and translation (translated keywords now match)
+    unique.sort(key=lambda x: _importance_score(x), reverse=True)
+
+    # Source diversity: cap per source to prevent one feed from dominating
+    max_per_source = min(3, MAX_ITEMS - 1)
+    diverse = []
+    source_counts = {}
+    for item in unique:
+        src = item.get("source", "未知")
+        count = source_counts.get(src, 0)
+        if count < max_per_source:
+            diverse.append(item)
+            source_counts[src] = count + 1
+    unique = diverse
+
     # Generate summaries
     for item in unique:
         item["summary"] = generate_summary(item["title"], item.get("content", ""))
@@ -808,13 +943,17 @@ def build_markdown(news_data):
             continue
 
         for i, item in enumerate(items, 1):
-            md.append(f"### {i}. {item.get('title', '')}")
-            md.append("")
-            if item.get("source"):
-                md.append(f"**来源**：{item['source']}")
-                md.append("")
+            title = item.get("title", "")
             summary = item.get("summary", "")
-            if summary and summary != item.get("title", ""):
+            source = item.get("source", "")
+
+            md.append(f"### {i}. {title}")
+            md.append("")
+            if source:
+                md.append(f"**来源**：{source}")
+                md.append("")
+            # Show summary if it adds info beyond the title
+            if summary and summary != title and not summary.startswith(title[:20]):
                 md.append(f"**摘要**：{summary}")
                 md.append("")
             if item.get("url"):
