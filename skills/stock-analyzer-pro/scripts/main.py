@@ -6,16 +6,17 @@ Stock Analyzer Pro - 专业股票/基金分析工具
 """
 
 import sys
+import os
 import json
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 
-# 添加父目录到路径
-sys.path.insert(0, '/home/admin/.openclaw/workspace/skills/stock-analyzer-pro')
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scripts.data_sources.multi_source import MultiSourceDataSource
 from scripts.data_sources.yfinance_us import YFinanceDataSource
 from scripts.data_sources.fund_cn import FundDataSource
+from scripts.data_sources.eastmoney_finance import EastMoneyFinanceSource
 from scripts.analysis.financial import FinancialAnalyzer
 from scripts.analysis.technical import TechnicalAnalyzer
 from scripts.analysis.valuation import ValuationAnalyzer
@@ -32,8 +33,12 @@ class StockAnalyzerPro:
         self.data_source = MultiSourceDataSource()
         self.yfinance = YFinanceDataSource()
         self.fund = FundDataSource()
+        self.eastmoney_finance = EastMoneyFinanceSource()
         self.formatter = ReportFormatter()
         
+    # A-share prefixes that distinguish stocks from funds
+    _CN_STOCK_PREFIXES = ('6', '0', '3', '9')
+
     def detect_market(self, code: str) -> str:
         """
         检测股票代码所属市场
@@ -46,24 +51,19 @@ class StockAnalyzerPro:
         """
         code = code.upper().strip()
         
-        # A 股代码：6 位数字 + .SH/.SZ 或纯 6 位数字
         if code.endswith('.SH') or code.endswith('.SZ'):
             return 'cn_stock'
-        if code.isdigit() and len(code) == 6:
-            return 'cn_stock'
-            
-        # 港股代码：5 位数字 + .HK
+
         if code.endswith('.HK'):
-            return 'cn_stock'  # AKShare 也支持港股
-            
-        # 美股代码：字母组合
+            return 'cn_stock'
+
+        if code.isdigit() and len(code) == 6:
+            if code.startswith(self._CN_STOCK_PREFIXES):
+                return 'cn_stock'
+            return 'cn_fund'
+
         if code.isalpha() or (code.replace('.', '').replace('-', '').isalnum()):
             return 'us_stock'
-            
-        # 基金代码：6 位数字
-        if code.isdigit() and len(code) == 6:
-            # 需要进一步判断是股票还是基金
-            return 'cn_fund'  # 默认按基金处理
             
         return 'unknown'
     
@@ -104,22 +104,29 @@ class StockAnalyzerPro:
                     quote_data['high_52w'] = high_52w
                     quote_data['low_52w'] = low_52w
             
-        # 2. 获取财务数据
-        financial_data = datasource.get_financials(code)
+        # 2. 获取财务数据 -- 优先使用东方财富（指标完整），失败则 fallback
+        financial_data = None
+        if market in ('cn_stock',):
+            financial_data = self.eastmoney_finance.get_financial_indicators(code)
+        if not financial_data:
+            financial_data = datasource.get_financials(code)
+            # 补充行情中的 ROE 到简版财务数据
+            if financial_data and 'indicators' in financial_data:
+                roe_from_quote = quote_data.get('roe')
+                if roe_from_quote and roe_from_quote > 0:
+                    financial_data['indicators']['roe'] = roe_from_quote
         
-        # 2.5 将行情数据中的 ROE 补充到财务数据
-        if financial_data and 'indicators' in financial_data:
-            roe_from_quote = quote_data.get('roe')
-            if roe_from_quote and roe_from_quote > 0:
-                financial_data['indicators']['roe'] = roe_from_quote
-        
+        # 2.5 获取行业分类（用于差异化估值）
+        industry = None
+        if market == 'cn_stock':
+            industry = self.eastmoney_finance.get_industry(code)
+
         # 3. 获取历史行情（用于技术分析）
         history_data = datasource.get_history(code, period='1y')
         
         # 4. 数据真实性验证
         validation_report = DataValidator.generate_validation_report(quote_data, financial_data)
         
-        # 如果数据验证问题严重，添加警告
         if validation_report['confidence_score'] < 70:
             print(f"⚠️ 数据可信度：{validation_report['confidence_score']}% ({validation_report['confidence_level']})")
             for issue in validation_report['issues'][:3]:
@@ -128,9 +135,9 @@ class StockAnalyzerPro:
         # 5. 执行分析
         financial_analysis = FinancialAnalyzer.analyze(financial_data) if financial_data else {}
         technical_analysis = TechnicalAnalyzer.analyze(history_data) if history_data is not None and len(history_data) > 0 else {}
-        valuation_analysis = ValuationAnalyzer.analyze(quote_data, financial_data) if financial_data else {}
+        valuation_analysis = ValuationAnalyzer.analyze(quote_data, financial_data, industry=industry, history_data=history_data) if financial_data else {}
         risk_analysis = RiskAnalyzer.analyze(code, quote_data)
-        value_analysis = ValueInvestingAnalyzer.analyze(quote_data, financial_data)
+        value_analysis = ValueInvestingAnalyzer.analyze(quote_data, financial_data, industry=industry)
         
         # 6. 生成报告
         report = self.formatter.format_report(
@@ -194,12 +201,12 @@ class StockAnalyzerPro:
         if market == 'us_stock':
             quote = self.yfinance.get_quote(code)
         else:
-            quote = self.akshare.get_quote(code)
+            quote = self.data_source.get_quote(code)
             
         if not quote:
             return f"❌ 无法获取 {code} 的数据"
             
-        return f"{quote.get('name', code)}: ¥{quote.get('price', 0):.2f} ({quote.get('change_percent', 0):+.2f}%) - PE: {quote.get('pe', 'N/A')}"
+        return f"{quote.get('name', code)}: ¥{quote.get('price', 0):.2f} ({quote.get('change_percent', 0):+.2f}%) - PE: {quote.get('pe_ttm', 'N/A')}"
 
 
 def main():

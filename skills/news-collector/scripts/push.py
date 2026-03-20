@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 统一新闻推送入口
-流程：generate_news.py 生成 -> 飞书文档 create -> write -> read 验证 -> 发送链接
+流程：generate_news.py 生成 → 飞书 API 创建文档 → 写入内容 → 发送链接
 
 用法：
   python3 push.py                    # 生成新闻 + 推送飞书文档
@@ -12,8 +12,11 @@
 import os
 import sys
 import re
+import json
 import time
 import subprocess
+import urllib.request
+import urllib.parse
 from datetime import datetime
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -22,6 +25,9 @@ OPENCLAW_BIN = os.environ.get("OPENCLAW_BIN", "openclaw")
 FEISHU_USER_ID = os.environ.get("FEISHU_USER_ID", "")
 NEWS_FILE = os.environ.get("NEWS_OUTPUT", "/tmp/news_brief.md")
 LOG_FILE = os.path.join(WORKSPACE, "memory", "news_push.log")
+
+OPENCLAW_CONFIG = os.path.join(os.path.expanduser("~"), ".openclaw", "openclaw.json")
+FEISHU_API_BASE = "https://open.feishu.cn/open-apis"
 
 RETRY_ATTEMPTS = 2
 RETRY_DELAY = 2
@@ -40,7 +46,6 @@ def log(msg):
 
 
 def run_cmd(cmd, timeout=60):
-    """Run a shell command and return (returncode, stdout, stderr)."""
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout, cwd=WORKSPACE
@@ -53,20 +58,197 @@ def run_cmd(cmd, timeout=60):
 
 
 def run_cmd_with_retry(cmd, timeout=60, retries=None):
-    """Run a shell command with automatic retry on failure."""
     retries = retries if retries is not None else RETRY_ATTEMPTS
     for attempt in range(1 + retries):
         code, stdout, stderr = run_cmd(cmd, timeout)
         if code == 0:
             return code, stdout, stderr
         if attempt < retries:
-            log(f"  Retry {attempt + 1}/{retries} after failure: {stderr[:100]}")
+            log(f"  Retry {attempt + 1}/{retries}: {stderr[:100]}")
             time.sleep(RETRY_DELAY)
     return code, stdout, stderr
 
 
+# ---------------------------------------------------------------------------
+# Feishu API (direct HTTP, no CLI dependency)
+# ---------------------------------------------------------------------------
+
+class FeishuAPI:
+    """Direct Feishu/Lark API client using tenant access token."""
+
+    def __init__(self):
+        self._token = None
+        self._token_expires = 0
+        self._app_id = None
+        self._app_secret = None
+        self._load_credentials()
+
+    def _load_credentials(self):
+        try:
+            with open(OPENCLAW_CONFIG, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            feishu = cfg.get("channels", {}).get("feishu", {})
+            self._app_id = feishu.get("appId")
+            self._app_secret = feishu.get("appSecret")
+            if not self._app_id or not self._app_secret:
+                raise ValueError("Missing appId or appSecret")
+        except Exception as e:
+            log(f"ERROR: Failed to load Feishu credentials: {e}")
+            raise
+
+    def _ensure_token(self):
+        if self._token and time.time() < self._token_expires:
+            return
+        data = json.dumps({
+            "app_id": self._app_id,
+            "app_secret": self._app_secret,
+        }).encode()
+        req = urllib.request.Request(
+            f"{FEISHU_API_BASE}/auth/v3/tenant_access_token/internal",
+            data=data,
+            headers={"Content-Type": "application/json; charset=utf-8"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read().decode())
+        if result.get("code") != 0:
+            raise RuntimeError(f"Token error: {result}")
+        self._token = result["tenant_access_token"]
+        self._token_expires = time.time() + result.get("expire", 7000) - 60
+
+    def _api_call(self, method, path, body=None):
+        self._ensure_token()
+        url = f"{FEISHU_API_BASE}{path}"
+        encoded = json.dumps(body).encode() if body else None
+        req = urllib.request.Request(url, data=encoded, method=method, headers={
+            "Content-Type": "application/json; charset=utf-8",
+            "Authorization": f"Bearer {self._token}",
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode("utf-8", errors="ignore")
+            raise RuntimeError(f"HTTP {e.code}: {error_body[:300]}")
+
+    def create_document(self, title):
+        result = self._api_call("POST", "/docx/v1/documents", {"title": title, "folder_token": ""})
+        if result.get("code") != 0:
+            raise RuntimeError(f"Create doc failed: {result}")
+        doc = result["data"]["document"]
+        return doc["document_id"]
+
+    def write_blocks(self, doc_id, blocks):
+        result = self._api_call(
+            "POST",
+            f"/docx/v1/documents/{doc_id}/blocks/{doc_id}/children",
+            {"children": blocks, "index": 0},
+        )
+        if result.get("code") != 0:
+            raise RuntimeError(f"Write blocks failed: code={result.get('code')} msg={result.get('msg')}")
+        return True
+
+    def get_block_count(self, doc_id):
+        result = self._api_call("GET", f"/docx/v1/documents/{doc_id}/blocks/{doc_id}/children?document_revision_id=-1", None)
+        if result.get("code") != 0:
+            return 0
+        return len(result.get("data", {}).get("items", []))
+
+
+# ---------------------------------------------------------------------------
+# Markdown → Feishu DocX blocks converter
+# ---------------------------------------------------------------------------
+
+def _parse_inline(text):
+    """Parse inline markdown (bold, italic, links) into Feishu text elements."""
+    elements = []
+    pos = 0
+
+    pattern = re.compile(
+        r'\[([^\]]+)\]\(([^)]+)\)'    # [text](url)
+        r'|\*\*(.+?)\*\*'             # **bold**
+        r'|_(.+?)_'                    # _italic_
+    )
+
+    for m in pattern.finditer(text):
+        if m.start() > pos:
+            elements.append({"text_run": {"content": text[pos:m.start()]}})
+
+        if m.group(1) is not None:
+            encoded_url = urllib.parse.quote(m.group(2), safe=':/?&=#%')
+            elements.append({"text_run": {
+                "content": m.group(1),
+                "text_element_style": {"link": {"url": encoded_url}},
+            }})
+        elif m.group(3) is not None:
+            elements.append({"text_run": {
+                "content": m.group(3),
+                "text_element_style": {"bold": True},
+            }})
+        elif m.group(4) is not None:
+            elements.append({"text_run": {
+                "content": m.group(4),
+                "text_element_style": {"italic": True},
+            }})
+        pos = m.end()
+
+    if pos < len(text):
+        elements.append({"text_run": {"content": text[pos:]}})
+
+    if not elements:
+        elements.append({"text_run": {"content": text or " "}})
+
+    return elements
+
+
+def markdown_to_blocks(md_text):
+    """Convert markdown text to Feishu DocX block format."""
+    blocks = []
+    lines = md_text.split("\n")
+    i = 0
+
+    while i < len(lines):
+        line = lines[i].rstrip()
+        i += 1
+
+        if not line:
+            continue
+
+        if line.startswith("# "):
+            blocks.append({
+                "block_type": 3,
+                "heading1": {"elements": _parse_inline(line[2:]), "style": {}},
+            })
+        elif line.startswith("## "):
+            blocks.append({
+                "block_type": 4,
+                "heading2": {"elements": _parse_inline(line[3:]), "style": {}},
+            })
+        elif line.startswith("### "):
+            blocks.append({
+                "block_type": 5,
+                "heading3": {"elements": _parse_inline(line[4:]), "style": {}},
+            })
+        elif line.strip() == "---":
+            blocks.append({"block_type": 22, "divider": {}})
+        elif line.startswith("> "):
+            blocks.append({
+                "block_type": 2,
+                "text": {"elements": _parse_inline("💬 " + line[2:]), "style": {}},
+            })
+        else:
+            blocks.append({
+                "block_type": 2,
+                "text": {"elements": _parse_inline(line), "style": {}},
+            })
+
+    return blocks
+
+
+# ---------------------------------------------------------------------------
+# Push flow
+# ---------------------------------------------------------------------------
+
 def generate_news():
-    """Run generate_news.py to produce the news file."""
     log("Step 1: Generating news...")
     code, stdout, stderr = run_cmd(
         [sys.executable, os.path.join(SCRIPT_DIR, "generate_news.py")],
@@ -76,7 +258,7 @@ def generate_news():
         log(f"ERROR: generate_news.py failed (exit {code}): {stderr[:500]}")
         return False
     if not os.path.exists(NEWS_FILE):
-        log(f"ERROR: {NEWS_FILE} not created after generate_news.py")
+        log(f"ERROR: {NEWS_FILE} not created")
         return False
     size = os.path.getsize(NEWS_FILE)
     log(f"News generated: {size} bytes")
@@ -84,96 +266,72 @@ def generate_news():
 
 
 def read_news_content():
-    """Read the generated news markdown."""
     with open(NEWS_FILE, "r", encoding="utf-8") as f:
         return f.read()
 
 
-def feishu_create_doc(title):
-    """Create a Feishu doc (title only) and return doc_token. Retries on failure."""
+def push_to_feishu(title, content):
+    """Create Feishu doc, write content blocks, verify, return doc URL."""
+    api = FeishuAPI()
+
     log(f"Step 2: Creating Feishu doc: {title}")
-    code, stdout, stderr = run_cmd_with_retry(
-        [OPENCLAW_BIN, "feishu_doc", "create", "--title", title]
-    )
-    if code != 0:
-        log(f"ERROR: feishu_doc create failed (exit {code}): {stderr[:500]}")
-        return None
+    doc_id = api.create_document(title)
+    log(f"Doc created: {doc_id}")
 
-    token_match = re.search(r'"?doc_token"?\s*[:=]\s*"?([A-Za-z0-9_-]+)"?', stdout)
-    if token_match:
-        token = token_match.group(1)
-        log(f"Doc created, token: {token}")
-        return token
+    log(f"Step 3: Converting markdown to blocks...")
+    blocks = markdown_to_blocks(content)
+    log(f"Converted {len(blocks)} blocks")
 
-    token_match = re.search(r'([A-Za-z0-9_-]{20,})', stdout)
-    if token_match:
-        token = token_match.group(1)
-        log(f"Doc created (parsed token): {token}")
-        return token
+    # Write in batches (API limit: ~50 blocks per request)
+    batch_size = 40
+    for batch_start in range(0, len(blocks), batch_size):
+        batch = blocks[batch_start:batch_start + batch_size]
+        log(f"  Writing blocks {batch_start + 1}-{batch_start + len(batch)}...")
+        try:
+            api.write_blocks(doc_id, batch)
+        except RuntimeError as e:
+            log(f"  WARNING: Block write error: {e}")
+            log(f"  Retrying with individual blocks...")
+            for j, block in enumerate(batch):
+                try:
+                    api.write_blocks(doc_id, [block])
+                except Exception as e2:
+                    log(f"  Skip block {batch_start + j}: {e2}")
 
-    log(f"ERROR: Could not parse doc_token from output: {stdout[:300]}")
+    log(f"Step 4: Verifying doc...")
+    count = api.get_block_count(doc_id)
+    verified = count > 1
+    if verified:
+        log(f"Verified: {count} blocks")
+    else:
+        log(f"WARNING: Only {count} block(s)")
+
+    doc_url = f"https://feishu.cn/docx/{doc_id}"
+    return doc_url, verified
+
+
+def _detect_feishu_user_id():
+    """Auto-detect Feishu user open_id from openclaw sessions."""
+    if FEISHU_USER_ID:
+        return FEISHU_USER_ID
+    try:
+        code, stdout, _ = run_cmd([OPENCLAW_BIN, "sessions", "--json"], timeout=10)
+        if code == 0:
+            data = json.loads(stdout)
+            sessions = data if isinstance(data, list) else data.get("sessions", [])
+            for s in sessions:
+                key = s.get("key", "")
+                m = re.search(r'feishu:direct:(ou_[a-f0-9]+)', key)
+                if m:
+                    return m.group(1)
+    except Exception:
+        pass
     return None
 
 
-def feishu_write_doc(doc_token, content):
-    """Write content to an existing Feishu doc. Retries on failure."""
-    log(f"Step 3: Writing content to doc {doc_token} ({len(content)} chars)")
-    content_file = "/tmp/news_feishu_content.md"
-    with open(content_file, "w", encoding="utf-8") as f:
-        f.write(content)
-
-    code, stdout, stderr = run_cmd_with_retry(
-        [OPENCLAW_BIN, "feishu_doc", "write", "--doc_token", doc_token,
-         "--content-file", content_file]
-    )
-    if code != 0:
-        log(f"Write with --content-file failed, trying --content flag...")
-        code, stdout, stderr = run_cmd_with_retry(
-            [OPENCLAW_BIN, "feishu_doc", "write", "--doc_token", doc_token,
-             "--content", content[:30000]]
-        )
-    if code != 0:
-        log(f"ERROR: feishu_doc write failed (exit {code}): {stderr[:500]}")
-        return False
-    log("Content written successfully")
-    return True
-
-
-def feishu_verify_doc(doc_token):
-    """Read back the doc and verify content was written (block_count > 1)."""
-    log(f"Step 4: Verifying doc {doc_token}")
-    code, stdout, stderr = run_cmd(
-        [OPENCLAW_BIN, "feishu_doc", "read", "--doc_token", doc_token]
-    )
-    if code != 0:
-        log(f"WARNING: feishu_doc read failed (exit {code}): {stderr[:300]}")
-        return False
-
-    block_match = re.search(r'block_count["\s:=]+(\d+)', stdout)
-    if block_match:
-        count = int(block_match.group(1))
-        if count > 1:
-            log(f"Verified: {count} blocks in document")
-            return True
-        else:
-            log(f"WARNING: Only {count} block(s) — content may not have been written")
-            return False
-
-    if len(stdout.strip()) > 100:
-        log("Verified: doc has content (no block_count field, but output is non-empty)")
-        return True
-
-    log("WARNING: Could not verify doc content")
-    return False
-
-
-def send_doc_link(doc_token, verified=True):
-    """Send the document link via Feishu message."""
-    doc_url = f"https://feishu.cn/docx/{doc_token}"
+def send_doc_link(doc_url, verified=True):
     ts = datetime.now().strftime("%m-%d %H:%M")
-
-    warning = "" if verified else "\n⚠️ 注意：文档内容验证未通过，请手动检查文档是否完整"
-
+    warning = "" if verified else "\n⚠️ 注意：文档内容可能不完整，请手动检查"
     msg = (
         f"📰 全球要闻简报已更新 ({ts})\n\n"
         f"📄 查看详情：{doc_url}\n\n"
@@ -182,27 +340,21 @@ def send_doc_link(doc_token, verified=True):
 
     log(f"Step 5: Sending link: {doc_url}")
 
-    if FEISHU_USER_ID:
+    user_id = _detect_feishu_user_id()
+    if user_id:
+        target = f"user:{user_id}" if not user_id.startswith("user:") else user_id
         code, stdout, stderr = run_cmd_with_retry(
             [OPENCLAW_BIN, "message", "send",
              "--channel", "feishu",
-             "--target", f"user:{FEISHU_USER_ID}",
+             "--target", target,
              "--message", msg]
         )
         if code == 0:
-            log("Message sent via direct target")
+            log(f"Message sent to {user_id}")
             return True
-        log(f"Direct send failed, falling back to sessions_send: {stderr[:200]}")
+        log(f"Send failed: {stderr[:200]}")
 
-    code, stdout, stderr = run_cmd_with_retry(
-        [OPENCLAW_BIN, "sessions", "send", "--label", "main", "--message", msg]
-    )
-    if code == 0:
-        log("Message sent via sessions_send")
-        return True
-
-    log(f"ERROR: All send methods failed. Last error: {stderr[:300]}")
-    log(f"Manual link: {doc_url}")
+    log(f"ERROR: Could not send message. Manual link: {doc_url}")
     return False
 
 
@@ -214,7 +366,6 @@ def main():
     log("=" * 50)
     log("📰 News Push Start")
     log(f"  workspace: {WORKSPACE}")
-    log(f"  openclaw:  {OPENCLAW_BIN}")
     log(f"  dry_run:   {dry_run}")
     log("=" * 50)
 
@@ -238,15 +389,13 @@ def main():
     today = datetime.now().strftime("%Y 年 %m 月 %d 日")
     doc_title = f"📰 全球要闻简报 - {today}"
 
-    doc_token = feishu_create_doc(doc_title)
-    if not doc_token:
+    try:
+        doc_url, verified = push_to_feishu(doc_title, content)
+    except Exception as e:
+        log(f"ERROR: Feishu push failed: {e}")
         return 1
 
-    if not feishu_write_doc(doc_token, content):
-        return 1
-
-    verified = feishu_verify_doc(doc_token)
-    send_doc_link(doc_token, verified=verified)
+    send_doc_link(doc_url, verified=verified)
 
     log("DONE")
     return 0

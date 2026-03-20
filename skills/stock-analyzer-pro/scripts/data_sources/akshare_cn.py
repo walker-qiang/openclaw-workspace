@@ -51,7 +51,7 @@ class AKShareDataSource:
         elif '.HK' in code:
             # 港股格式：hk00700
             hk_code = code.replace('.HK', '')
-            return 'hk' + hk_code.zfill(4)  # 补齐 4 位
+            return 'hk' + hk_code.zfill(5)
         return code
     
     def get_quote(self, code: str) -> Optional[Dict[str, Any]]:
@@ -146,28 +146,27 @@ class AKShareDataSource:
     
     def get_history(self, code: str, period: str = '1y') -> Optional[pd.DataFrame]:
         """
-        获取历史行情（使用腾讯 API）
+        获取历史行情（使用腾讯 kline API），支持 A 股和港股
         """
         try:
-            sina_code = self._cn_stock_code_to_sina(code)
-            stock_code = sina_code[2:]
-            market = 'sh' if 'sh' in sina_code else 'sz'
-            
-            # 腾讯历史数据 API
-            url = f"http://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={market}{stock_code},,,,{min(365, 320)},60&fq=qfq"
-            
+            tencent_code = self._cn_stock_code_to_sina(code)
+            url = (
+                f"http://web.ifzq.gtimg.cn/appstock/app/kline/kline"
+                f"?param={tencent_code},day,,,320"
+            )
+
             resp = self.session.get(url, timeout=10)
             resp.raise_for_status()
-            
+
             data = resp.json()
-            if not data.get('data', {}).get(market + stock_code, {}).get('qfq'):
+            entry = data.get('data', {}).get(tencent_code, {})
+            klines = entry.get('day') or entry.get('qfq') or entry.get('')
+            if not klines:
                 return None
-                
-            klines = data['data'][market + stock_code]['qfq']
-            
+
             kdata = []
             for k in klines:
-                if len(k) >= 7:
+                if len(k) >= 6:
                     kdata.append({
                         'date': k[0],
                         'open': float(k[1]) if k[1] else 0,
@@ -175,18 +174,17 @@ class AKShareDataSource:
                         'high': float(k[3]) if k[3] else 0,
                         'low': float(k[4]) if k[4] else 0,
                         'volume': float(k[5]) if k[5] else 0,
-                        'amount': float(k[6]) if k[6] else 0
                     })
-            
+
             if not kdata:
                 return None
-                
+
             df = pd.DataFrame(kdata)
             return df[['date', 'open', 'high', 'low', 'close', 'volume']]
-            
+
         except Exception as e:
             print(f"获取历史数据失败：{e}")
-            
+
         return None
     
     def get_52week_range(self, code: str) -> tuple:
@@ -230,23 +228,21 @@ class AKShareDataSource:
             # 0:类型 1:名称 2:代码 3:当前价 4:昨收 5:今开 6:最高 7:最低
             # 36:ROE 39:PE 46:PB 49:BPS
             
-            price = float(parts[3]) if len(parts) > 3 and parts[3] else 0
-            pre_close = float(parts[4]) if len(parts) > 4 and parts[4] else price
-            
-            # PE 字段：39=静态 PE, 40=动态 PE (TTM)
-            pe_ttm = float(parts[40]) if len(parts) > 40 and parts[40] else None
-            pe_static = float(parts[39]) if len(parts) > 39 and parts[39] else None
-            pe = pe_ttm if pe_ttm else pe_static
-            
-            # PB 字段：46
-            pb = float(parts[46]) if len(parts) > 46 and parts[46] else None
-            
-            # ROE 字段：A 股=65, 美股=57
-            # 腾讯 A 股字段：65=ROE(百分比)
-            roe = float(parts[65]) if len(parts) > 65 and parts[65] else None
-            
-            # BVPS 字段：49
-            bvps = float(parts[49]) if len(parts) > 49 and parts[49] else None
+            def _f(idx):
+                if idx < len(parts) and parts[idx]:
+                    try:
+                        return float(parts[idx])
+                    except ValueError:
+                        return None
+                return None
+
+            is_hk = sina_code.startswith('hk')
+            price = _f(3) or 0
+
+            pe = _f(39)
+            pb = _f(58) if is_hk else _f(46)
+            roe = _f(65)
+            bvps = _f(49) if not is_hk else None
             
             # 如果 BVPS 无效，从 PB 反推
             if (not bvps or bvps <= 0) and pb and pb > 0 and price:

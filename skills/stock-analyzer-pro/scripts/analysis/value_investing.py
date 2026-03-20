@@ -12,12 +12,14 @@
 
 from typing import Dict, Any, Optional, Tuple
 
+from scripts.analysis.valuation import _match_industry_profile, _DEFAULT_PROFILE
+
 
 class ValueInvestingAnalyzer:
     """价值投资分析器"""
     
     @staticmethod
-    def analyze(quote_data: Dict[str, Any], financial_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    def analyze(quote_data: Dict[str, Any], financial_data: Optional[Dict[str, Any]], industry: Optional[str] = None) -> Dict[str, Any]:
         """
         价值投资分析
         
@@ -34,9 +36,10 @@ class ValueInvestingAnalyzer:
         price = quote_data.get('price', 0)
         pe = quote_data.get('pe_ttm')
         pb = quote_data.get('pb')
+        profile = _match_industry_profile(industry)
         
         # 1. 内在价值估算（多种方法）
-        intrinsic_value = ValueInvestingAnalyzer._estimate_intrinsic_value(quote_data, financial_data)
+        intrinsic_value = ValueInvestingAnalyzer._estimate_intrinsic_value(quote_data, financial_data, profile)
         
         # 2. 安全边际计算
         margin_of_safety = ValueInvestingAnalyzer._calculate_margin_of_safety(price, intrinsic_value)
@@ -65,46 +68,44 @@ class ValueInvestingAnalyzer:
         }
     
     @staticmethod
-    def _estimate_intrinsic_value(quote_data: Dict, financial_data: Optional[Dict]) -> Dict[str, float]:
+    def _estimate_intrinsic_value(quote_data: Dict, financial_data: Optional[Dict], profile: Optional[Dict] = None) -> Dict[str, float]:
         """
-        估算内在价值（多种方法）
-        
-        方法：
-        1. PE 法：合理 PE × EPS
-        2. PB 法：合理 PB × BVPS
-        3. 格雷厄姆公式：√(22.5 × EPS × BVPS)
-        4. DCF 简化版：EPS × (1 + g)^5 / r
+        估算内在价值（多种方法，使用行业参数）
         """
+        if profile is None:
+            profile = _DEFAULT_PROFILE
+
         price = quote_data.get('price', 0)
         pe = quote_data.get('pe_ttm')
         pb = quote_data.get('pb')
-        
-        # 从 PE 和价格反推 EPS
+
+        # Prefer TTM EPS derived from PE_TTM (more accurate for valuation)
         eps = (price / pe) if pe and pe > 0 else None
-        
-        # 从 PB 和价格反推 BVPS
         bvps = (price / pb) if pb and pb > 0 else None
-        
-        # 从财务数据获取 EPS 和 BVPS
+
         if financial_data and 'indicators' in financial_data:
+            fin_bvps = financial_data['indicators'].get('bvps')
+            if fin_bvps and fin_bvps > 0:
+                bvps = fin_bvps
             if not eps:
-                eps = financial_data['indicators'].get('eps')
-            if not bvps:
-                bvps = financial_data['indicators'].get('bvps')
-        
-        # 方法 1: PE 法（合理 PE 取 15-20）
+                fin_eps = financial_data['indicators'].get('eps')
+                if fin_eps and fin_eps > 0:
+                    eps = fin_eps
+
+        pe_low, pe_mid, pe_high = profile["pe"]
+        pb_low, pb_mid, pb_high = profile["pb"]
+
         if eps and eps > 0:
-            pe_value_low = eps * 15  # 保守
-            pe_value_mid = eps * 18  # 中性
-            pe_value_high = eps * 20  # 乐观
+            pe_value_low = eps * pe_low
+            pe_value_mid = eps * pe_mid
+            pe_value_high = eps * pe_high
         else:
             pe_value_low = pe_value_mid = pe_value_high = None
-        
-        # 方法 2: PB 法（合理 PB 取 2-3）
+
         if bvps and bvps > 0:
-            pb_value_low = bvps * 2
-            pb_value_mid = bvps * 2.5
-            pb_value_high = bvps * 3
+            pb_value_low = bvps * pb_low
+            pb_value_mid = bvps * pb_mid
+            pb_value_high = bvps * pb_high
         else:
             pb_value_low = pb_value_mid = pb_value_high = None
         

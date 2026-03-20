@@ -257,7 +257,7 @@ class ReportFormatter:
         company = fund_info.get('company', '未知')
         nav = fund_info.get('nav', 0)
         nav_change = fund_info.get('nav_change', 0)
-        
+
         markdown = f"""## 📈 {name} ({code}) 基金分析
 
 **生成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M')}
@@ -272,43 +272,46 @@ class ReportFormatter:
 | 基金公司 | {company} |
 | 基金经理 | {manager} |
 | 当前净值 | ¥{nav:.4f} |
-| 日涨跌 | {nav_change:+.2f}% |
 
 ---
 
 ### 📊 业绩表现
 
 """
-        
-        # 如果有净值历史，计算收益率
-        if nav_history is not None and len(nav_history) > 0:
+
+        perf = fund_info.get('performance')
+        if perf:
+            markdown += self._format_fund_performance(perf)
+        elif nav_history is not None and len(nav_history) > 0:
             markdown += self._calculate_fund_returns(nav_history)
         else:
-            markdown += "暂无历史净值数据\n"
-            
+            markdown += "暂无业绩数据\n"
+
         markdown += """
 ---
 
 ### 💼 重仓持仓
 
 """
-        
+
         if holdings and holdings.get('stocks'):
             stocks = holdings['stocks']
             markdown += "| 股票 | 代码 | 持仓比例 |\n|------|------|----------|\n"
-            # 显示前 5 大重仓股
-            for i in range(min(5, len(stocks))):
+            for i in range(min(10, len(stocks))):
                 stock = stocks[i] if isinstance(stocks, list) else list(stocks.values())[i]
-                markdown += f"| {stock.get('股票名称', 'N/A')} | {stock.get('股票代码', 'N/A')} | {stock.get('占净值比', 'N/A')}% |\n"
+                sname = stock.get('股票名称', stock.get('GPJC', 'N/A'))
+                scode = stock.get('股票代码', stock.get('GPDM', 'N/A'))
+                ratio = stock.get('占净值比', stock.get('JZBL', 'N/A'))
+                markdown += f"| {sname} | {scode} | {ratio}% |\n"
         else:
             markdown += "暂无持仓数据\n"
-            
+
         markdown += """
 ---
 
 > ⚠️ **免责声明**: 基金过往业绩不代表未来表现，投资需谨慎。
 """
-        
+
         return {
             'markdown': markdown,
             'code': code,
@@ -316,6 +319,24 @@ class ReportFormatter:
             'nav': nav,
             'type': fund_type
         }
+
+    @staticmethod
+    def _format_fund_performance(perf: Dict[str, float]) -> str:
+        """Format performance data from fund_info"""
+        def _fmt(val):
+            if val is None:
+                return 'N/A'
+            icon = '🟢' if val >= 0 else '🔴'
+            return f'{val:+.2f}% {icon}'
+
+        return f"""| 区间 | 收益率 |
+|------|--------|
+| 近一月 | {_fmt(perf.get('1m'))} |
+| 近三月 | {_fmt(perf.get('3m'))} |
+| 近六月 | {_fmt(perf.get('6m'))} |
+| 近一年 | {_fmt(perf.get('1y'))} |
+
+"""
     
     def _calculate_rating(
         self,
@@ -438,6 +459,33 @@ class ReportFormatter:
         return "N/A"
     
     def _calculate_fund_returns(self, nav_history) -> str:
-        """计算基金收益率"""
-        # 简化实现
-        return "暂无详细业绩数据\n"
+        """从净值历史 DataFrame 计算收益率"""
+        try:
+            df = nav_history.copy()
+            df['nav'] = df['nav'].astype(float)
+            if len(df) < 2:
+                return "净值数据不足\n"
+
+            latest_nav = df.iloc[0]['nav']
+            results = {}
+
+            for label, days in [('近一周', 5), ('近一月', 22), ('近三月', 66)]:
+                if len(df) > days:
+                    old_nav = float(df.iloc[days]['nav'])
+                    if old_nav > 0:
+                        ret = (latest_nav - old_nav) / old_nav * 100
+                        results[label] = ret
+
+            if not results:
+                return "净值数据不足以计算收益率\n"
+
+            def _fmt(val):
+                icon = '🟢' if val >= 0 else '🔴'
+                return f'{val:+.2f}% {icon}'
+
+            text = "| 区间 | 收益率 |\n|------|--------|\n"
+            for label, val in results.items():
+                text += f"| {label} | {_fmt(val)} |\n"
+            return text + "\n"
+        except Exception:
+            return "业绩计算失败\n"
