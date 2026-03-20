@@ -137,11 +137,11 @@ class FeishuAPI:
         doc = result["data"]["document"]
         return doc["document_id"]
 
-    def write_blocks(self, doc_id, blocks):
+    def write_blocks(self, doc_id, blocks, index=0):
         result = self._api_call(
             "POST",
             f"/docx/v1/documents/{doc_id}/blocks/{doc_id}/children",
-            {"children": blocks, "index": 0},
+            {"children": blocks, "index": index},
         )
         if result.get("code") != 0:
             raise RuntimeError(f"Write blocks failed: code={result.get('code')} msg={result.get('msg')}")
@@ -284,17 +284,20 @@ def push_to_feishu(title, content):
 
     # Write in batches (API limit: ~50 blocks per request)
     batch_size = 40
+    written = 0
     for batch_start in range(0, len(blocks), batch_size):
         batch = blocks[batch_start:batch_start + batch_size]
         log(f"  Writing blocks {batch_start + 1}-{batch_start + len(batch)}...")
         try:
-            api.write_blocks(doc_id, batch)
+            api.write_blocks(doc_id, batch, index=written)
+            written += len(batch)
         except RuntimeError as e:
             log(f"  WARNING: Block write error: {e}")
             log(f"  Retrying with individual blocks...")
             for j, block in enumerate(batch):
                 try:
-                    api.write_blocks(doc_id, [block])
+                    api.write_blocks(doc_id, [block], index=written)
+                    written += 1
                 except Exception as e2:
                     log(f"  Skip block {batch_start + j}: {e2}")
 

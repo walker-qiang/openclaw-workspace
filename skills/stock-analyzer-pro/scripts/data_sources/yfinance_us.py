@@ -142,22 +142,35 @@ class YFinanceDataSource:
         return None
     
     def get_financials(self, code: str) -> Optional[Dict[str, Any]]:
-        """
-        获取财务数据（简化版）
-        """
+        """从腾讯美股行情中提取可用的财务指标"""
+        quote = self.get_quote(code)
+        if not quote:
+            return None
+
+        price = quote.get('price', 0)
+        pe = quote.get('pe_ttm')
+        pb = quote.get('pb')
+        roe = quote.get('roe')
+        eps = quote.get('eps') or ((price / pe) if pe and pe > 0 else 0)
+        bvps = (price / pb) if pb and pb > 0 else 0
+
         return {
             'indicators': {
-                'roe': 0,
-                'gross_margin': 0,
-                'net_margin': 0,
-                'debt_ratio': 0,
-                'eps': 0,
-                'revenue_growth': 0,
+                'roe': roe or 0,
+                'eps': eps or 0,
+                'bvps': bvps or 0,
+                'gross_margin': None,
+                'net_margin': None,
+                'debt_ratio': None,
+                'current_ratio': None,
+                'revenue_growth': None,
+                'profit_growth': None,
             },
             'income': {},
             'balance': {},
             'cashflow': {},
-            'report_date': datetime.now().strftime('%Y-%m-%d')
+            'report_date': '',
+            'source': 'tencent_us',
         }
     
     def get_52week_range(self, code: str) -> tuple:

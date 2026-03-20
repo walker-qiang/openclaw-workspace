@@ -61,15 +61,29 @@ class ReportFormatter:
         # 财务指标详情
         if financial_analysis.get('key_metrics'):
             metrics = financial_analysis['key_metrics']
+            ratings = financial_analysis.get('ratings', {})
+
+            def _pct(val):
+                return f'{val:.2f}%' if val is not None else 'N/A'
+
+            def _icon(category):
+                return ratings.get(category, {}).get('icon', '⚪')
+
+            report_info = ''
+            rd = financial_analysis.get('report_date', '')
+            rt = financial_analysis.get('report_type', '')
+            if rd:
+                report_info = f'（数据截止 {rd}' + (f' {rt}' if rt else '') + '）'
+
             markdown += f"""| 指标 | 数值 | 评级 |
 |------|------|------|
-| ROE | {metrics.get('roe', 0):.2f}% | {financial_analysis.get('ratings', {}).get('roe', {}).get('icon', '⚪')} |
-| 毛利率 | {metrics.get('gross_margin', 0):.2f}% | {financial_analysis.get('ratings', {}).get('margin', {}).get('icon', '⚪')} |
-| 净利率 | {metrics.get('net_margin', 0):.2f}% | {financial_analysis.get('ratings', {}).get('margin', {}).get('icon', '⚪')} |
-| 负债率 | {metrics.get('debt_ratio', 0):.2f}% | {financial_analysis.get('ratings', {}).get('debt', {}).get('icon', '⚪')} |
-| 营收增长 | {metrics.get('revenue_growth', 0):.2f}% | {financial_analysis.get('ratings', {}).get('growth', {}).get('icon', '⚪')} |
+| ROE | {_pct(metrics.get('roe'))} | {_icon('roe')} |
+| 毛利率 | {_pct(metrics.get('gross_margin'))} | {_icon('margin')} |
+| 净利率 | {_pct(metrics.get('net_margin'))} | {_icon('margin')} |
+| 负债率 | {_pct(metrics.get('debt_ratio'))} | {_icon('debt')} |
+| 营收增长 | {_pct(metrics.get('revenue_growth'))} | {_icon('growth')} |
 
-**财务点评**: {financial_analysis.get('summary', '暂无')}
+**财务点评**: {financial_analysis.get('summary', '暂无')}{report_info}
 
 ---
 
