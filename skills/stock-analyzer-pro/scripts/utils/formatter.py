@@ -85,7 +85,15 @@ class ReportFormatter:
 
 **财务点评**: {financial_analysis.get('summary', '暂无')}{report_info}
 
----
+"""
+            # If data is incomplete, add an explicit note
+            completeness = financial_analysis.get('data_completeness', '')
+            if completeness and not completeness.startswith('5/'):
+                markdown += f"""> ℹ️ 财务数据完整度 {completeness}，显示 N/A 的指标为当前数据源未覆盖（非财报未发布）。已发布的财报数据可能需要其他数据源补充。
+
+"""
+
+            markdown += """---
 
 """
         
