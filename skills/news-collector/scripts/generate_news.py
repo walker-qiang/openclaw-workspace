@@ -566,6 +566,25 @@ def fetch_article_content(url, timeout=None):
 # Summary generation
 # ---------------------------------------------------------------------------
 
+def _strip_tag_soup(text):
+    """Strip trailing comma-separated keyword tags (common on 163.com).
+    E.g. '正文内容,伊朗,沙特,石油设施,加沙地带' → '正文内容'"""
+    # Find trailing tag list: 3+ comma-separated short segments at the end
+    m = re.search(r'((?:,\s*[\w\u4e00-\u9fff·]+){3,})\s*$', text)
+    if m:
+        tags_part = m.group(1)
+        segments = [s.strip() for s in tags_part.split(',') if s.strip()]
+        if all(len(s) <= 10 for s in segments):
+            text = text[:m.start()].rstrip(' ,，')
+    # Also handle Chinese comma variant
+    m = re.search(r'((?:，[\w\u4e00-\u9fff·]+){3,})\s*$', text)
+    if m:
+        segments = [s.strip() for s in m.group(1).split('，') if s.strip()]
+        if all(len(s) <= 10 for s in segments):
+            text = text[:m.start()].rstrip(' ,，')
+    return text.strip()
+
+
 def generate_summary(title, content):
     """Generate 50-80 char summary. Data-first, subject-verb-object."""
     if not content:
@@ -573,6 +592,7 @@ def generate_summary(title, content):
         return clean[:80]
 
     content = clean_html(content)
+    content = _strip_tag_soup(content)
 
     low_quality = ["首页>", "导航", "专题", "广告", "推荐", "登录", "注册", "下载 APP", "扫码",
                    "Cookie", "Subscribe", "newsletter"]
@@ -740,6 +760,82 @@ def _search_news(category, hours=168):
 
 
 # ---------------------------------------------------------------------------
+# Quality helpers (cross-dedup, misclassification, topic diversity, staleness)
+# ---------------------------------------------------------------------------
+
+def _extract_key_terms(text):
+    """Extract key terms (Chinese bigrams + English words) for overlap comparison."""
+    terms = set()
+    for seq in re.findall(r'[\u4e00-\u9fff]+', text):
+        for j in range(len(seq) - 1):
+            terms.add(seq[j:j + 2])
+    for w in re.findall(r'[A-Za-z]{3,}', text):
+        terms.add(w.lower())
+    return terms
+
+
+def _titles_are_same_story(t1, t2):
+    """Return True if two titles likely describe the same story (>50% term overlap)."""
+    terms1 = _extract_key_terms(t1)
+    terms2 = _extract_key_terms(t2)
+    if not terms1 or not terms2:
+        return False
+    smaller = min(len(terms1), len(terms2))
+    if smaller == 0:
+        return False
+    return len(terms1 & terms2) / smaller > 0.5
+
+
+def _category_keyword_match_count(text, category):
+    """Count how many keywords from *category* appear in *text*."""
+    keywords = CATEGORY_KEYWORDS.get(category, [])
+    text_lower = text.lower()
+    return sum(1 for kw in keywords if kw.lower() in text_lower)
+
+
+_TOPIC_MARKERS = {
+    "伊朗": "iran", "以色列": "israel", "中东": "mideast",
+    "加沙": "gaza", "巴勒斯坦": "palestine", "哈马斯": "hamas",
+    "俄罗斯": "russia", "乌克兰": "ukraine", "台湾": "taiwan",
+    "朝鲜": "nkorea", "韩国": "skorea",
+    "特朗普": "trump", "拜登": "biden", "内塔尼亚胡": "netanyahu",
+    "关税": "tariff", "贸易战": "tradewar",
+}
+
+
+def _extract_topic_key(title):
+    """Return a dominant topic tag for the title, or None."""
+    for marker, key in _TOPIC_MARKERS.items():
+        if marker in title:
+            return key
+    return None
+
+
+def _extract_date_from_text(text):
+    """Try to parse an explicit date mention from the first 500 chars of article text."""
+    now = datetime.now()
+    patterns = [
+        (r'(\d{4})年(\d{1,2})月(\d{1,2})日', True),
+        (r'(\d{4})-(\d{1,2})-(\d{1,2})', True),
+        (r'(\d{1,2})月(\d{1,2})日', False),
+    ]
+    snippet = text[:500]
+    for pat, has_year in patterns:
+        m = re.search(pat, snippet)
+        if m:
+            try:
+                groups = m.groups()
+                if has_year:
+                    y, mo, d = int(groups[0]), int(groups[1]), int(groups[2])
+                else:
+                    y, mo, d = now.year, int(groups[0]), int(groups[1])
+                return datetime(y, mo, d)
+            except (ValueError, OverflowError):
+                continue
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Category-level fetch + filter
 # ---------------------------------------------------------------------------
 
@@ -781,6 +877,25 @@ def _fetch_category(category, sources):
         if len(validated) < len(result):
             print(f"      军事过滤：{len(result)} → {len(validated)} 条")
         result = validated
+
+    # Misclassification cross-check: drop items that match 0 keywords for this
+    # category but match 2+ keywords for a different one (e.g. monetary policy
+    # article from a tech source appearing under 科技)
+    if category in CATEGORY_KEYWORDS:
+        before = len(result)
+        kept = []
+        for item in result:
+            combined = item["title"] + " " + item.get("content", "")
+            own = _category_keyword_match_count(combined, category)
+            if own == 0 and any(
+                _category_keyword_match_count(combined, other) >= 2
+                for other in CATEGORY_KEYWORDS if other != category
+            ):
+                continue
+            kept.append(item)
+        if len(kept) < before:
+            print(f"      分类交叉检查：{before} → {len(kept)} 条")
+        result = kept
 
     # SearxNG supplement if too few items
     if len(result) < 3:
@@ -853,8 +968,23 @@ def _fetch_category(category, sources):
                 except Exception:
                     pass
 
-    # Re-rank after enrichment and translation (translated keywords now match)
-    unique.sort(key=lambda x: _importance_score(x), reverse=True)
+    # Stale-content detection: deprioritize items whose article text
+    # contains an explicit date older than the category time window
+    now = datetime.now()
+    for item in unique:
+        content = item.get("content", "")
+        if content:
+            article_date = _extract_date_from_text(content)
+            if article_date:
+                age_hours = (now - article_date).total_seconds() / 3600
+                if age_hours > check_hours:
+                    item["_stale"] = True
+
+    # Re-rank after enrichment and translation; penalise confirmed-stale items
+    unique.sort(
+        key=lambda x: _importance_score(x) - (50 if x.get("_stale") else 0),
+        reverse=True,
+    )
 
     # Source diversity: cap per source to prevent one feed from dominating
     max_per_source = min(3, MAX_ITEMS - 1)
@@ -867,6 +997,31 @@ def _fetch_category(category, sources):
             diverse.append(item)
             source_counts[src] = count + 1
     unique = diverse
+
+    # Topic diversity: if >60% of items share one dominant topic, cap it at 3
+    topic_counts = {}
+    for item in unique:
+        topic = _extract_topic_key(item.get("title", ""))
+        if topic:
+            topic_counts[topic] = topic_counts.get(topic, 0) + 1
+    total_items = len(unique)
+    dominant = {t for t, c in topic_counts.items()
+                if total_items and c / total_items > 0.6}
+    if dominant:
+        max_per_topic = 3
+        topic_used = {}
+        capped = []
+        for item in unique:
+            topic = _extract_topic_key(item.get("title", ""))
+            if topic in dominant:
+                used = topic_used.get(topic, 0)
+                if used >= max_per_topic:
+                    continue
+                topic_used[topic] = used + 1
+            capped.append(item)
+        if len(capped) < len(unique):
+            print(f"      主题多样性：{len(unique)} → {len(capped)} 条")
+        unique = capped
 
     # Generate summaries
     for item in unique:
@@ -904,6 +1059,21 @@ def fetch_all_news():
     ordered = {}
     for cat in NEWS_SOURCES:
         ordered[cat] = news_data.get(cat, [])
+
+    # Cross-category dedup: earlier categories have priority
+    seen_titles = []
+    for cat in ordered:
+        kept = []
+        for item in ordered[cat]:
+            title = item.get("title", "")
+            if any(_titles_are_same_story(title, st) for st in seen_titles):
+                continue
+            kept.append(item)
+            seen_titles.append(title)
+        if len(kept) < len(ordered[cat]):
+            print(f"  🔀 {cat}: 跨分类去重 {len(ordered[cat])} → {len(kept)} 条")
+        ordered[cat] = kept
+
     return ordered
 
 
@@ -957,7 +1127,7 @@ def build_markdown(news_data):
                 md.append(f"**摘要**：{summary}")
                 md.append("")
             if item.get("url"):
-                md.append(f"[阅读原文]({item['url']})")
+                md.append(f"🔗 [阅读原文 →]({item['url']})")
                 md.append("")
             total += 1
 

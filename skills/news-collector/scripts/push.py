@@ -205,6 +205,7 @@ def markdown_to_blocks(md_text):
     blocks = []
     lines = md_text.split("\n")
     i = 0
+    item_count_in_section = 0  # track news items within a ## section
 
     while i < len(lines):
         line = lines[i].rstrip()
@@ -214,21 +215,31 @@ def markdown_to_blocks(md_text):
             continue
 
         if line.startswith("# "):
+            item_count_in_section = 0
             blocks.append({
                 "block_type": 3,
                 "heading1": {"elements": _parse_inline(line[2:]), "style": {}},
             })
         elif line.startswith("## "):
+            item_count_in_section = 0
             blocks.append({
                 "block_type": 4,
                 "heading2": {"elements": _parse_inline(line[3:]), "style": {}},
             })
         elif line.startswith("### "):
+            # Add a blank line + thin divider between news items (not before the 1st)
+            if item_count_in_section > 0:
+                blocks.append({
+                    "block_type": 2,
+                    "text": {"elements": [{"text_run": {"content": " ", "text_element_style": {}}}], "style": {}},
+                })
+            item_count_in_section += 1
             blocks.append({
                 "block_type": 5,
                 "heading3": {"elements": _parse_inline(line[4:]), "style": {}},
             })
         elif line.strip() == "---":
+            item_count_in_section = 0
             blocks.append({"block_type": 22, "divider": {}})
         elif line.startswith("> "):
             blocks.append({
